@@ -151,10 +151,10 @@ def build(basic_bin, lbl_file, orig_bin, output_bin):
 
     print(f"\nWrote {len(flash)} bytes to {output_bin}")
     print(f"Flash layout:")
-    print(f"  Bank 0 ($00000): WDC firmware fallback")
+    print(f"  Bank 0 ($00000): EhBASIC + Wozmon (auto-boots via WDC sig)")
     print(f"  Bank 1 ($08000): empty")
     print(f"  Bank 2 ($10000): empty")
-    print(f"  Bank 3 ($18000): EhBASIC + wozmon (default boot)")
+    print(f"  Bank 3 ($18000): WDC SXB2 firmware (NEVER OVERWRITE)")
     print(f"\nTo flash: minipro -p SST39SF010A -w {output_bin}")
 
 if __name__ == '__main__':
