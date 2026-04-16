@@ -1,0 +1,21 @@
+# Build artifacts
+build/
+
+# ROM images
+*.bin
+*.rom
+
+# Assembler/linker artifacts  
+*.o
+*.lbl
+*.map
+*.lst
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Editors
+*.swp
+*~
+.vscode/
