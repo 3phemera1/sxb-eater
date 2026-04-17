@@ -30,13 +30,20 @@ $(BUILD)/eater.bin $(BUILD)/eater.lbl: $(BUILD) \
 	ca65 -I$(CC65_INC) -Ibios -Iwozmon -Ibasic -D eater basic/msbasic.s -o $(BUILD)/eater.o
 	ld65 -C cfg/sxb.cfg $(BUILD)/eater.o -o $(BUILD)/eater.bin -Ln $(BUILD)/eater.lbl
 
+WDCMON    = docs/wdc_reference/W65C02SXB.s28
+
 # Patch and build final ROM image
 $(BUILD)/SXB_eater.bin: $(BUILD)/eater.bin $(BUILD)/eater.lbl $(SXB_ORIG)
-	python3 tools/build_rom.py \
-		$(BUILD)/eater.bin \
-		$(BUILD)/eater.lbl \
-		$(SXB_ORIG) \
-		$(BUILD)/SXB_eater.bin
+	@if [ -f "$(WDCMON)" ]; then \
+		python3 tools/build_rom.py \
+			$(BUILD)/eater.bin $(BUILD)/eater.lbl \
+			$(SXB_ORIG) $(BUILD)/SXB_eater.bin \
+			--wdcmon $(WDCMON); \
+	else \
+		python3 tools/build_rom.py \
+			$(BUILD)/eater.bin $(BUILD)/eater.lbl \
+			$(SXB_ORIG) $(BUILD)/SXB_eater.bin; \
+	fi
 
 flash: $(BUILD)/SXB_eater.bin
 	minipro -p "SST39SF010A" -w $(BUILD)/SXB_eater.bin

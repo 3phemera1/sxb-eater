@@ -67,14 +67,14 @@ MONCOUT:
 CHROUT:
                 pha                     ; save character
                 stz     VIA2_DDRA       ; tristate port A
-                sta     VIA2_ORA        ; write char to data bus
+                sta     VIA2_ORA        ; latch char into ORA
 TxWait:         lda     #$01
                 bit     VIA2_ORB        ; test TX ready (bit 0)
                 bne     TxWait          ; wait until clear
                 lda     #$04
                 tsb     VIA2_ORB        ; WR strobe high
                 lda     #$FF
-                sta     VIA2_DDRA       ; drive port A as output
+                sta     VIA2_DDRA       ; drive port A (exact WDC sequence)
                 nop
                 nop
                 lda     #$04
@@ -87,9 +87,12 @@ TxWait:         lda     #$01
 IRQ_HANDLER:
                 rti
 
-.include "wozmon.s"
 
 .segment "RESETVEC"
                 .word   $0F00           ; NMI vector
                 .word   RESET           ; RESET vector
                 .word   IRQ_HANDLER     ; IRQ vector
+
+
+.segment "WOZMON"
+.include "wozmon.s"

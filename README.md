@@ -190,3 +190,24 @@ MS BASIC source is copyright Microsoft 1977. The ca65 port, wozmon, and
 surrounding infrastructure are MIT licensed per their respective upstream
 repositories. SXB-specific files (`bios/bios_sxb.s`, `tools/build_rom.py`,
 `tools/bootstrap_flash.py`, `cfg/sxb.cfg`, `Makefile`) are MIT licensed.
+
+## Flashing Your Own Code
+
+The bootstrap script and build pipeline are not limited to EhBASIC. Any
+32KB binary image can be flashed to bank 0. The only requirement is that
+it begins with the `WDC\x00` signature and a `JMP <entry>` at `$8004` so
+the SXB2 bootloader can hand off to it after USB initialization.
+
+```bash
+# Flash any 32KB bank 0 image
+python3 tools/bootstrap_flash.py <port> your_image.bin
+
+# Or with minipro (builds a full 128KB image preserving bank 3):
+python3 tools/build_rom.py your_code.bin your_code.lbl SXB_orig.bin your_flash.bin
+minipro -p "SST39SF010A" -w your_flash.bin
+```
+
+`build_rom.py` expects a label file for the `RESET` symbol. If your code
+doesn't use ca65/ld65, you can patch the `WDC\x00` signature, `JMP`, and
+RESET vector manually — see `docs/wdc_reference/NOTES.md` for the exact
+layout required.
