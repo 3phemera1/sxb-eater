@@ -500,14 +500,20 @@ def build_flash_writer_for_bank(target_bank):
     """
     Flash writer for a single bank. Same as build_flash_writer but
     only programs the target bank. Receives 32768 raw bytes.
+    
+    SST39SF010A unlock addresses ($D555/$AAAA) are physical addresses
+    that only map correctly when bank 0 is active (PCR=$CC).
+    For any target bank, we switch to bank 0 for unlocks, then back
+    to target bank for the actual erase/program command.
     """
     VIA2_ORB  = 0x7FE0
     VIA2_ORA  = 0x7FE1
     VIA2_DDRB = 0x7FE2
     VIA2_DDRA = 0x7FE3
     VIA2_PCR  = 0x7FEC
-    UNLOCK1   = 0xD555
-    UNLOCK2   = 0xAAAA
+    UNLOCK1   = 0xD555   # valid when bank 0 active
+    UNLOCK2   = 0xAAAA   # valid when bank 0 active
+    PCR_BANK0 = PCR[0]   # always use bank 0 for unlock sequences
     PCR_VAL   = PCR[target_bank]
 
     PTR_LO   = 0x20
@@ -553,11 +559,16 @@ def build_flash_writer_for_bank(target_bank):
     b(0xA9, 0x08); b(0x85, SECT_CNT)
 
     label('sector_loop')
+    # Unlock: switch to bank 0 for correct $D555/$AAAA mapping
+    b(0xA9, PCR_BANK0); b(0x8D, VIA2_PCR&0xFF, VIA2_PCR>>8)
     b(0xA9, 0xAA); b(0x8D, UNLOCK1&0xFF, UNLOCK1>>8)
     b(0xA9, 0x55); b(0x8D, UNLOCK2&0xFF, UNLOCK2>>8)
     b(0xA9, 0x80); b(0x8D, UNLOCK1&0xFF, UNLOCK1>>8)
     b(0xA9, 0xAA); b(0x8D, UNLOCK1&0xFF, UNLOCK1>>8)
     b(0xA9, 0x55); b(0x8D, UNLOCK2&0xFF, UNLOCK2>>8)
+    # Switch to target bank for erase command
+    b(0xA9, PCR_VAL); b(0x8D, VIA2_PCR&0xFF, VIA2_PCR>>8)
+    b(0xA2, 0x00)                # restore X=0
     b(0xA9, 0x30); b(0x81, PTR_LO)
 
     label('erase_poll')
@@ -569,9 +580,14 @@ def build_flash_writer_for_bank(target_bank):
     label('byte_loop')
     jsr('uart_rx')
     b(0xA8)
+    # Unlock: switch to bank 0 for correct $D555/$AAAA mapping
+    b(0xA9, PCR_BANK0); b(0x8D, VIA2_PCR&0xFF, VIA2_PCR>>8)
     b(0xA9, 0xAA); b(0x8D, UNLOCK1&0xFF, UNLOCK1>>8)
     b(0xA9, 0x55); b(0x8D, UNLOCK2&0xFF, UNLOCK2>>8)
     b(0xA9, 0xA0); b(0x8D, UNLOCK1&0xFF, UNLOCK1>>8)
+    # Switch to target bank for byte program
+    b(0xA9, PCR_VAL); b(0x8D, VIA2_PCR&0xFF, VIA2_PCR>>8)
+    b(0xA2, 0x00)                # restore X=0
     b(0x98); b(0x81, PTR_LO)
 
     b(0xA9, 0x40)

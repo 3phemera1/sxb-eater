@@ -32,7 +32,12 @@ PCR_BANK2_VAL   = $EC
 RESET:
                 ; Dirty reset circuit workaround removed (not needed on SXB)
                 CLD
+                LDX     #$FF
+                TXS                     ; init stack pointer
                 JSR     INIT_BUFFER
+                ; Clear stale input buffer to prevent replay after reset
+                LDA     #$0D
+                STA     IN
 ;                JSR     LCDINIT         ; LCD init using lcd.s
                 CLI
                 LDA     #$1F            ; 8-N-1, 19200 bps
