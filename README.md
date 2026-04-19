@@ -77,7 +77,7 @@ minipro -p "SST39SF010A" -r SXB_orig.bin
 ## Building
 
 ```bash
-git clone https://github.com/WW0K/sxb-eater.git
+git clone https://github.com/3phemera1/sxb-eater.git
 cd sxb-eater
 cp /path/to/SXB_orig.bin .
 
