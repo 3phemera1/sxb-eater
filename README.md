@@ -14,7 +14,7 @@ On power-up:
 1. WDC SXB2 firmware wakes, drives the LED diamond pattern
 2. Initializes VIA2 for USB serial (FT245 parallel FIFO)
 3. Detects `WDC\x00` signature at `$8000` in bank 3 → hands off
-4. Wozmon starts — type `A0B9R` to launch MS BASIC (look at `grep -i "cold" ~/Peronal_Repos/sxb_eater/build/eater.lbl`)
+4. Wozmon starts — type `A0B9R` to launch MS BASIC (look at `grep -i "cold" sxb_eater/build/eater.lbl`)
 
 ## Hardware
 
