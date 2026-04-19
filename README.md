@@ -69,7 +69,7 @@ LED diamond sequence on startup. Everything else works identically.
 ```bash
 # No SXB_orig.bin needed - just clone and make:
 make
-python3 tools/bootstrap_flash.py  build/SXB_eater.bin
+python3 tools/bootstrap_flash.py <serial_port>  build/SXB_eater.bin
 ```
 
 The only difference from a full build: no LED diamond on boot/reset,
