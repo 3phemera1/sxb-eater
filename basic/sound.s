@@ -1,49 +1,66 @@
 .segment "CODE"
 .ifdef EATER
-T1CL   = $6004
-T1CH   = $6005
-ACR    = $600B
+
+VIA_T1CL = $7FC4    ; T1 counter/latch low
+VIA_T1CH = $7FC5    ; T1 counter high (writing starts timer)
+VIA_T1LL = $7FC6    ; T1 latch low
+VIA_T1LH = $7FC7    ; T1 latch high
+VIA_ACR  = $7FCB    ; Auxiliary control register
+VIA_DDRB = $7FC2    ; Port B DDR
 
 BEEP:
-  jsr FRMEVL
-  jsr MKINT
+    jsr     FRMEVL
+    jsr     MKINT
 
-  ; Check if parameter is zero
-  lda FAC+4
-  ora FAC+3
-  beq @silent
+    ; Check if parameter is zero
+    lda     FAC+4
+    ora     FAC+3
+    beq     @silent
 
-  ; Set T1 timer with parameter
-  lda FAC+4
-  sta T1CL
-  lda FAC+3
-  sta T1CH
+    ; Make PB7 an output
+    lda     VIA_DDRB
+    ora     #$80
+    sta     VIA_DDRB
 
-  ; Start square wave on PB7
-  lda #$c0
-  sta ACR
+    ; Load T1 latch with frequency value
+    lda     FAC+4
+    sta     VIA_T1CL
+    lda     FAC+3
+    sta     VIA_T1CH
+
+    ; ACR: T1 free-run, PB7 toggled
+    lda     VIA_ACR
+    ora     #$C0
+    sta     VIA_ACR
+
+    jmp     @delay
 
 @silent:
-  jsr CHKCOM
-  jsr GETBYT
-  cpx #0
-  beq @done
+@delay:
+    jsr     CHKCOM
+    jsr     GETBYT
+    cpx     #0
+    beq     @done
 
 @delay1:
-  ldy #$ff
+    ldy     #$ff
 @delay2:
-  nop
-  nop
-  dey
-  bne @delay2
-  dex
-  bne @delay1
+    nop
+    nop
+    dey
+    bne     @delay2
+    dex
+    bne     @delay1
 
-  ; Stop square wave on PB7
-  lda #0
-  sta ACR
+    ; Stop square wave
+    lda     VIA_ACR
+    and     #$3F
+    sta     VIA_ACR
+    lda     $7FC0
+    and     #$7F
+    sta     $7FC0
 
 @done:
-  rts
+    rts
 
 .endif
