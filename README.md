@@ -60,6 +60,21 @@ $FFFA-$FFFF  Interrupt vectors (RESET=$F996)
 
 ## Requirements
 
+### Building without a chip dump (no programmer)
+
+If you don't have `SXB_orig.bin`, `make` will automatically detect this
+and build with `--no-orig`. The board boots directly to wozmon with no
+LED diamond sequence on startup. Everything else works identically.
+
+```bash
+# No SXB_orig.bin needed - just clone and make:
+make
+python3 tools/bootstrap_flash.py  build/SXB_eater.bin
+```
+
+The only difference from a full build: no LED diamond on boot/reset,
+and no USB enumeration delay before wozmon starts.
+
 ### Build tools
 
 - **cc65**: `brew install cc65`
