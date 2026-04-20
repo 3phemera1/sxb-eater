@@ -227,11 +227,21 @@ def build(basic_bin, lbl_file, orig_bin, output_bin, wdcmon_s28=None):
     print(f"  $8000: {bytes(basic[0:7]).hex()}")
 
     flash = bytearray(131072)
+    # Bank 0 = SXB2 firmware (full, from SXB_orig.bin bank 3)
+    # Overlay WDCMON s28 patch on top if present
+    flash[0x00000:0x08000] = wdc_bank
     if wdcmon_s28:
-        flash[0x00000:0x08000] = load_s28(wdcmon_s28)
-        print(f"  Bank 0: WDCMON from {wdcmon_s28}")
+        s28_data = load_s28(wdcmon_s28)
+        for i, b in enumerate(s28_data):
+            if b != 0xFF:
+                flash[i] = b
+        print(f"  Bank 0: SXB2 + WDCMON overlay from {wdcmon_s28}")
     else:
-        flash[0x00000:0x08000] = wdc_bank
+        print(f"  Bank 0: SXB2 firmware (from SXB_orig.bin)")
+    # Wipe WDC signature from bank 0 so SXB2 always enters host mode
+    # (used as permanent recovery via NMI button)
+    flash[0] = 0xFF; flash[1] = 0xFF; flash[2] = 0xFF; flash[3] = 0xFF
+    print(f"  Bank 0: WDC sig wiped -> SXB2 always in host mode (NMI recovery)")
     flash[0x08000:0x10000] = bytes([0xFF] * 32768)
     flash[0x10000:0x18000] = bytes([0xFF] * 32768)
     flash[0x18000:0x20000] = basic

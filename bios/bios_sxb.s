@@ -89,10 +89,89 @@ IRQ_HANDLER:
 
 
 .segment "RESETVEC"
-                .word   $0F00           ; NMI vector
+                .word   NMI_HANDLER     ; NMI vector -> bank 0 (WDCMON)
                 .word   RESET           ; RESET vector
                 .word   IRQ_HANDLER     ; IRQ vector
 
 
 .segment "WOZMON"
 .include "wozmon.s"
+
+; NMI handler - minimal bootstrap: receive flash writer, execute it
+; Protocol (from host):
+;   1. Send $A5 (sync)
+;   2. Send 255 bytes (flash writer code)
+;   Board receives to $0800 and executes
+.segment "CODE"
+NMI_HANDLER:
+                sei
+                ldx     #$FF
+                txs
+                ; Init VIA2
+                lda     #$0C
+                sta     VIA2_ORB
+                lda     #$0C
+                sta     VIA2_DDRB
+                stz     VIA2_DDRA
+
+                ; Wait for $A5 sync
+@sync_wait:     lda     #$02
+@sync_poll:     bit     VIA2_ORB
+                bne     @sync_poll
+                lda     #$08
+                trb     VIA2_ORB
+                nop
+                nop
+                lda     VIA2_ORA
+                pha
+                lda     #$08
+                tsb     VIA2_ORB
+                pla
+                cmp     #$A5
+                bne     @sync_wait
+
+                ; Send $01 ACK
+                lda     #$FF
+                sta     VIA2_DDRA
+                lda     #$01
+                sta     VIA2_ORA
+                lda     #$01
+@ack_poll:      bit     VIA2_ORB
+                bne     @ack_poll
+                lda     VIA2_ORB
+                ora     #$04
+                sta     VIA2_ORB
+                nop
+                nop
+                lda     VIA2_ORB
+                and     #$FB
+                sta     VIA2_ORB
+                stz     VIA2_DDRA
+
+                ; Receive 255 bytes to $0800
+                lda     #$00
+                sta     $20             ; ZP ptr lo
+                lda     #$08
+                sta     $21             ; ZP ptr hi = $0800
+                ldy     #$FF            ; 255 bytes
+@recv_loop:     lda     #$02
+@recv_poll:     bit     VIA2_ORB
+                bne     @recv_poll
+                lda     #$08
+                trb     VIA2_ORB
+                nop
+                nop
+                lda     VIA2_ORA
+                pha
+                lda     #$08
+                tsb     VIA2_ORB
+                pla
+                sta     ($20)
+                inc     $20
+                dey
+                bne     @recv_loop
+
+                ; Execute at $0800
+                jmp     $0800
+
+NMI_STUB_END:

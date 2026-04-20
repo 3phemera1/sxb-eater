@@ -256,22 +256,39 @@ def open_port(port):
     return s
 
 
-def sxb2_handshake(s):
-    for _ in range(15):
-        s.reset_input_buffer()
-        s.write(bytes([0x55, 0xAA]))
-        s.flush()
-        time.sleep(0.05)
-        resp = s.read(1)
-        if resp == bytes([MAGIC_ACK]):
-            return True
-        time.sleep(0.1)
-    return False
+def sxb2_handshake(s, initial=False):
+    """
+    initial=True  (factory mode): send $55/$AA, wait for $CC ACK
+    initial=False (NMI mode):     send $A5, wait for $01 ACK
+    """
+    if not initial:
+        # NMI mode: send $A5, wait for $01
+        # Don't reset_input_buffer - $01 may arrive any time after NMI press
+        for _ in range(60):
+            s.write(bytes([0xA5]))
+            s.flush()
+            time.sleep(0.3)
+            resp = s.read(2)
+            if resp and resp[0] == 0x01:
+                return True
+        return False
+    else:
+        # Factory SXB2 mode: $55/$AA -> $CC
+        for _ in range(30):
+            s.reset_input_buffer()
+            s.write(bytes([0x55, 0xAA]))
+            s.flush()
+            time.sleep(0.05)
+            resp = s.read(1)
+            if resp == bytes([MAGIC_ACK]):
+                return True
+            time.sleep(0.1)
+        return False
 
 
-def sxb2_write_mem(s, data):
+def sxb2_write_mem(s, data, initial=False):
     """Upload data to RAM at $0800 via SXB2 CMD $07."""
-    if not sxb2_handshake(s):
+    if not sxb2_handshake(s, initial=initial):
         raise RuntimeError("SXB2 handshake failed")
     n = len(data)
     s.write(bytes([CMD_WRITE, 0x00, 0x08, 0x00,
@@ -283,17 +300,28 @@ def sxb2_write_mem(s, data):
 
 def sxb2_exec(s, addr):
     """Execute at addr via SXB2 CMD $06."""
-    if not sxb2_handshake(s):
+    if not sxb2_handshake(s, initial=False):
         raise RuntimeError("SXB2 handshake failed")
     s.write(bytes([CMD_EXEC, addr & 0xFF, (addr >> 8) & 0xFF, 0x00]))
     s.flush()
 
 
-def upload_writer(s, writer):
-    """Upload flash writer directly to $0800 via SXB2 CMD $07, exec at $0800."""
-    assert len(writer) <= 512, f"Writer too large: {len(writer)}"
-    print(f"  Uploading {len(writer)} bytes to $0800...")
-    sxb2_write_mem(s, writer)
+def upload_writer(s, writer, nmi_mode=False):
+    """Upload flash writer to RAM.
+    nmi_mode=True:  after $01 ACK, send 255 bytes, board executes at $0800
+    nmi_mode=False: factory CMD $07 protocol to $0800
+    """
+    if nmi_mode:
+        assert len(writer) <= 255, f"Writer too large: {len(writer)}"
+        padded = (writer + bytes(255))[:255]
+        print(f"  Uploading {len(writer)} bytes to $0800 (NMI mode)...")
+        s.write(padded)
+        s.flush()
+        time.sleep(0.05 + 255 * 0.0001)
+    else:
+        assert len(writer) <= 512, f"Writer too large: {len(writer)}"
+        print(f"  Uploading {len(writer)} bytes to ${WRITER_BASE:04x}...")
+        sxb2_write_mem(s, writer, initial=False)
 
 
 def bootstrap(port, image_path):
@@ -329,21 +357,34 @@ def bootstrap(port, image_path):
     print(f"Opening {port}...")
     s = open_port(port)
 
-    print("Waiting for SXB2 handshake...")
-    print("  (Board must be in host mode - bank 0 empty)")
-    if not sxb2_handshake(s):
-        print("ERROR: No SXB2 response.")
-        sys.exit(1)
+    # NMI mode: bank 0 has SXB2 with wiped sig
+    nmi_mode = (image[0] == 0xFF and image[4] == 0x4C)
+
+    if nmi_mode:
+        print("Waiting for NMI handshake...")
+        print("  (Press NMI button on board)")
+        if not sxb2_handshake(s, initial=False):
+            print("ERROR: No NMI response.")
+            sys.exit(1)
+    else:
+        print("Waiting for SXB2 handshake...")
+        print("  (Board must be in host mode - bank 0 empty)")
+        if not sxb2_handshake(s, initial=True):
+            print("ERROR: No SXB2 response.")
+            sys.exit(1)
     print("  Handshake OK!")
 
     print()
     print("Uploading flash writer to RAM...")
-    upload_writer(s, writer)
+    upload_writer(s, writer, nmi_mode=nmi_mode)
     print("  Upload complete")
 
-    print("Executing flash writer...")
-    sxb2_exec(s, WRITER_BASE)
-    time.sleep(0.5)
+    if not nmi_mode:
+        print("Executing flash writer...")
+        sxb2_exec(s, WRITER_BASE)
+        time.sleep(0.5)
+    else:
+        time.sleep(0.3)
 
     # Wait for 'R' (ready)
     print("Waiting for writer ready signal ('R')...")
@@ -439,12 +480,12 @@ def reflash_bank(port, image_path, bank, s=None):
         print(f"Opening {port}...")
         s = open_port(port)
     print("Waiting for handshake...")
-    if not sxb2_handshake(s):
+    if not sxb2_handshake(s, initial=True):
         print("ERROR: No response. Make sure board is in WDCMON mode (B0 from wozmon).")
         sys.exit(1)
     print("  Handshake OK!")
 
-    sxb2_write_mem(s, writer)
+    sxb2_write_mem(s, writer, initial=True)
     sxb2_exec(s, WRITER_BASE)
     time.sleep(0.5)
 
