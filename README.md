@@ -164,7 +164,8 @@ wozmon starts (no visible prompt — see note below).
 ### Launching MS BASIC
 
 ```
-A0A0R
+A0B9R
+[NOTE:  Should look at .lbl file for correct location, changes as code changes]
 ```
 
 Press Enter at both prompts (`MEMORY SIZE?` and `TERMINAL WIDTH?`).
