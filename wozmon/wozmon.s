@@ -252,9 +252,9 @@ BANK0:          LDA     #PCR_BANK0
 BANK1:          LDA     #PCR_BANK1_VAL
                 BNE     DO_SWITCH
 BANK2:          LDA     #PCR_BANK2_VAL
-                BNE     DO_SWITCH
-BANK3:          LDA     #PCR_BANK3
-
 DO_SWITCH:
                 STA     VIA2_PCR        ; switch bank
                 JMP     $8000           ; jump to new bank entry point
+BANK3:          LDA     #PCR_BANK3
+                STA     VIA2_PCR        ; select bank 3
+                JMP     RESET           ; restart wozmon (direct, avoids $8000 WDC sig bytes)
