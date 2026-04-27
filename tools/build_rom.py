@@ -28,7 +28,7 @@ def find_label(lbl_file, label):
                 return int(parts[1], 16)
     return None
 
-def build_no_orig(basic_bin, lbl_file, output_bin, wdcmon_s28=None):
+def build_no_orig(basic_bin, lbl_file, output_bin, wdcmon_s28=None, monitor_bin=None):
     """
     Build flash image without SXB_orig.bin.
     Skips WDC init stubs - RESET vector points directly to wozmon RESET.
@@ -68,7 +68,14 @@ def build_no_orig(basic_bin, lbl_file, output_bin, wdcmon_s28=None):
     else:
         flash[0x00000:0x08000] = bytes([0xFF] * 32768)
         print(f"  Bank 0: empty ($FF)")
-    flash[0x08000:0x10000] = bytes([0xFF] * 32768)
+    if monitor_bin:
+        with open(monitor_bin, 'rb') as f:
+            mon = f.read()
+        flash[0x08000:0x10000] = mon
+        print(f"  Bank 1: C monitor from {monitor_bin}")
+    else:
+        flash[0x08000:0x10000] = bytes([0xFF] * 32768)
+        print(f"  Bank 1: empty ($FF)")
     flash[0x10000:0x18000] = bytes([0xFF] * 32768)
     flash[0x18000:0x20000] = basic
 
@@ -77,8 +84,8 @@ def build_no_orig(basic_bin, lbl_file, output_bin, wdcmon_s28=None):
 
     print(f"\nWrote {len(flash)} bytes to {output_bin}")
     print(f"Flash layout (no-orig mode):")
-    print(f"  Bank 0 ($00000): empty (or WDCMON if --wdcmon supplied)")
-    print(f"  Bank 1 ($08000): empty")
+    print(f"  Bank 0 ($00000): {'WDCMON' if wdcmon_s28 else 'empty'}")
+    print(f"  Bank 1 ($08000): {'C monitor' if monitor_bin else 'empty'}")
     print(f"  Bank 2 ($10000): empty")
     print(f"  Bank 3 ($18000): EhBASIC + Wozmon (direct boot, no LED diamond)")
     print(f"\nNote: --no-orig skips WDC init stubs.")
@@ -86,7 +93,7 @@ def build_no_orig(basic_bin, lbl_file, output_bin, wdcmon_s28=None):
     print(f"\nTo flash: python3 tools/bootstrap_flash.py <port> {output_bin}")
 
 
-def build(basic_bin, lbl_file, orig_bin, output_bin, wdcmon_s28=None):
+def build(basic_bin, lbl_file, orig_bin, output_bin, wdcmon_s28=None, monitor_bin=None):
     with open(orig_bin, 'rb') as f:
         orig = f.read()
     with open(basic_bin, 'rb') as f:
@@ -242,7 +249,14 @@ def build(basic_bin, lbl_file, orig_bin, output_bin, wdcmon_s28=None):
     # (used as permanent recovery via NMI button)
     flash[0] = 0xFF; flash[1] = 0xFF; flash[2] = 0xFF; flash[3] = 0xFF
     print(f"  Bank 0: WDC sig wiped -> SXB2 always in host mode (NMI recovery)")
-    flash[0x08000:0x10000] = bytes([0xFF] * 32768)
+    if monitor_bin:
+        with open(monitor_bin, 'rb') as f:
+            mon = f.read()
+        flash[0x08000:0x10000] = mon
+        print(f"  Bank 1: C monitor from {monitor_bin}")
+    else:
+        flash[0x08000:0x10000] = bytes([0xFF] * 32768)
+        print(f"  Bank 1: empty ($FF)")
     flash[0x10000:0x18000] = bytes([0xFF] * 32768)
     flash[0x18000:0x20000] = basic
 
@@ -252,7 +266,7 @@ def build(basic_bin, lbl_file, orig_bin, output_bin, wdcmon_s28=None):
     print(f"\nWrote {len(flash)} bytes to {output_bin}")
     print(f"Flash layout:")
     print(f"  Bank 0 ($00000): {'WDCMON' if wdcmon_s28 else 'WDC SXB2 fallback'}")
-    print(f"  Bank 1 ($08000): empty")
+    print(f"  Bank 1 ($08000): {'C monitor' if monitor_bin else 'empty'}")
     print(f"  Bank 2 ($10000): empty")
     print(f"  Bank 3 ($18000): EhBASIC + Wozmon (auto-boot)")
     print(f"\nTo flash: python3 tools/bootstrap_flash.py <port> {output_bin}")
@@ -283,6 +297,7 @@ if __name__ == '__main__':
                    help='SXB_orig.bin chip dump (omit with --no-orig)')
     p.add_argument('output_bin')
     p.add_argument('--wdcmon', help='W65C02SXB.s28 for bank 0')
+    p.add_argument('--monitor', help='32 KB monitor.bin to embed in bank 1')
     p.add_argument('--no-orig', action='store_true',
                    help='Skip WDC init stubs (no SXB_orig.bin needed). '
                         'Board boots directly to wozmon, no LED diamond.')
@@ -290,13 +305,11 @@ if __name__ == '__main__':
 
     if args.no_orig:
         if args.orig_bin and args.orig_bin != args.output_bin:
-            # orig_bin was supplied positionally but --no-orig set
-            # treat it as output_bin if output_bin wasn't given
             pass
         build_no_orig(args.basic_bin, args.lbl_file, args.output_bin,
-                      wdcmon_s28=args.wdcmon)
+                      wdcmon_s28=args.wdcmon, monitor_bin=args.monitor)
     else:
         if args.orig_bin is None:
             p.error("orig_bin is required unless --no-orig is specified")
         build(args.basic_bin, args.lbl_file, args.orig_bin, args.output_bin,
-              wdcmon_s28=args.wdcmon)
+              wdcmon_s28=args.wdcmon, monitor_bin=args.monitor)

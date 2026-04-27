@@ -8,15 +8,17 @@ This is a retro computing project for the **WDC W65C02SXB single-board computer*
 
 ## Build
 
-**Prerequisites**: cc65 suite (ca65 assembler, ld65 linker), Python 3, GNU Make
+**Prerequisites**: cc65 suite (ca65, ld65, cc65 compiler), Python 3, GNU Make
 
 ```bash
-make                  # produces build/SXB_eater.bin (131072 bytes, 4 × 32KB banks)
+make                  # produces build/SXB_eater.bin with bank 1 C monitor
+make NO_MONITOR=1     # omit bank 1 C monitor (bank 1 left as $FF)
 ```
 
-The build pipeline is two-stage:
-1. `make` assembles the 6502 source with ca65 and links with ld65 using `cfg/sxb.cfg`
-2. `tools/build_rom.py` patches the result: extracts WDC firmware stubs from `SXB_orig.bin` (optional factory dump), writes `WDC\x00` signature at bank $8000, relocates WDC init stubs (LED diamond, USB enumeration), and assembles the final 4-bank image
+The build pipeline is three-stage:
+1. `make` assembles bank 3 (EhBASIC + wozmon + bios) with ca65 → ld65
+2. `make` compiles + assembles the bank 1 C monitor with cc65 → ca65 → ld65
+3. `tools/build_rom.py` patches the result: extracts WDC firmware stubs from `SXB_orig.bin` (optional factory dump), writes `WDC\x00` signature at each bank's $8000, and assembles the final 4-bank image
 
 If `SXB_orig.bin` is absent, build proceeds with `--no-orig` (boots without WDC LED diamond sequence).
 
