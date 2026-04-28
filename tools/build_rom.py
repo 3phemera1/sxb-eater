@@ -111,10 +111,16 @@ def build(basic_bin, lbl_file, orig_bin, output_bin, wdcmon_s28=None, monitor_bi
     do_switch = find_label(lbl_file, 'DO_SWITCH')
     if do_switch is None:
         raise RuntimeError("Could not find DO_SWITCH label - is wozmon built?")
-    FREE_BASE = do_switch + 6
+    wozmon_end = find_label(lbl_file, 'WOZMON_END')
+    if wozmon_end is not None:
+        FREE_BASE = wozmon_end
+        print(f"Wozmon DO_SWITCH at ${do_switch:04x}, WOZMON_END at ${wozmon_end:04x}, FREE_BASE=${FREE_BASE:04x}")
+    else:
+        # Fallback for builds without WOZMON_END label (pre-fix): skip DO_SWITCH(3) + BANK3(8)
+        FREE_BASE = do_switch + 11
+        print(f"Wozmon DO_SWITCH at ${do_switch:04x} (no WOZMON_END label), FREE_BASE=${FREE_BASE:04x}")
     if FREE_BASE + 200 > 0xFFFA:
         raise RuntimeError(f"No room for stubs: FREE_BASE=${FREE_BASE:04x}, need 200 bytes before $FFFA")
-    print(f"Wozmon DO_SWITCH at ${do_switch:04x}, FREE_BASE=${FREE_BASE:04x}")
 
     def wdc(start, end):
         return bytearray(orig[0x18000+(start-0x8000):0x18000+(end-0x8000)])

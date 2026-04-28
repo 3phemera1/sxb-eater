@@ -13,6 +13,7 @@ MODE            = $2B
 IN              = $0200
 
 VIA2_PCR        = $7FEC         ; bank select register
+BANK_TRAMPOLINE = $02FA         ; 6-byte RAM trampoline: STA $7FEC ; JMP $8004
 PCR_BANK0       = $CC           ; bank 0 (WDCMON)
 PCR_BANK1       = $C4           ; bank 1 (user)  CA2=low CB2=low CA1edge=0 CB1=high?
 PCR_BANK2       = $4C           ; bank 2 (user)
@@ -44,6 +45,22 @@ RESET:
                 STA     ACIA_CTRL
                 LDY     #$89            ; No parity, no echo, rx interrupts
                 STY     ACIA_CMD
+
+                ; Init bank-switch RAM trampoline: STA $7FEC ; JMP $8004
+                ; DO_SWITCH jumps here with A = target PCR value.
+                ; Runs from RAM so the JMP $8004 executes from the new bank safely.
+                LDA     #$8D
+                STA     BANK_TRAMPOLINE
+                LDA     #<VIA2_PCR
+                STA     BANK_TRAMPOLINE+1
+                LDA     #>VIA2_PCR
+                STA     BANK_TRAMPOLINE+2
+                LDA     #$4C
+                STA     BANK_TRAMPOLINE+3
+                LDA     #$04
+                STA     BANK_TRAMPOLINE+4
+                LDA     #$80
+                STA     BANK_TRAMPOLINE+5
 
                 LDX     #$FF
 DELAY_OUT:
@@ -253,8 +270,11 @@ BANK1:          LDA     #PCR_BANK1_VAL
                 BNE     DO_SWITCH
 BANK2:          LDA     #PCR_BANK2_VAL
 DO_SWITCH:
-                STA     VIA2_PCR        ; switch bank
-                JMP     $8000           ; jump to new bank entry point
+                ; A = target PCR value.  Jump to RAM trampoline which does
+                ; STA $7FEC (bank switch) then JMP $8004, both from RAM so
+                ; the JMP fetch is unaffected by the bank change.
+                JMP     BANK_TRAMPOLINE
 BANK3:          LDA     #PCR_BANK3
                 STA     VIA2_PCR        ; select bank 3
                 JMP     RESET           ; restart wozmon (direct, avoids $8000 WDC sig bytes)
+WOZMON_END:

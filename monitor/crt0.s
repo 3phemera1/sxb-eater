@@ -34,6 +34,10 @@ VIA2_DDRB = $7FE2
 VIA2_DDRA = $7FE3
 VIA2_PCR  = $7FEC
 
+; RAM trampoline initialized by wozmon RESET: STA $7FEC ; JMP $8004
+; Must be in RAM so the JMP fetch after the bank switch reads from RAM, not ROM.
+BANK_TRAMPOLINE = $02FA
+
 ; ── ROMHDR segment: WDC\x00 signature + JMP entry (must be at $8000) ────────
 .segment "ROMHDR"
     .byte   $57,$44,$43,$00         ; 'W','D','C',$00 — SXB2 auto-boot signature
@@ -102,8 +106,11 @@ hang:
 ; ─────────────────────────────────────────────────────────────────────────────
 .export _do_bank_switch
 _do_bank_switch:
-    sta     VIA2_PCR                ; select bank
-    jmp     $8000                   ; jump to new bank entry point
+    ; A = target PCR value (fastcall).
+    ; Jump to RAM trampoline (initialized by wozmon RESET) which does
+    ;   STA $7FEC   (select bank)
+    ;   JMP $8004   (enter new bank, fetched from RAM — safe after bank switch)
+    jmp     BANK_TRAMPOLINE
 
 ; ── NMI and IRQ handlers (trivial — polled I/O only) ────────────────────────
 .segment "CODE"
