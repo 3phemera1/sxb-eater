@@ -70,14 +70,30 @@ DELAY_IN:
                 BNE     DELAY_IN
                 DEX
                 BNE     DELAY_OUT
-                ; Poll until FT245 TX FIFO is ready (TXE# = bit 0 of VIA2_ORB,
-                ; active-low).  On cold boot this waits for USB enumeration and
-                ; the terminal to open the COM port; on a warm restart (B3)
-                ; TXE# is already low so we exit immediately.
-WAIT_TX_READY:
+                ; Wait for FT245 TX FIFO ready (TXE# = bit 0 of VIA2_ORB, active-low).
+                ; On cold power-up the FT245 needs USB enumeration (1-3s typical)
+                ; before TXE# goes low.  CHROUT blocks unboundedly on TXE#, so we
+                ; must wait here long enough for enumeration to finish.
+                ; 48 passes × ~106ms ≈ ~5s at 8 MHz — covers worst-case enumeration.
+                ; On warm restart (B3) TXE# is already low so this exits immediately.
+                LDA     #$30            ; pass counter (ACIA_CTRL = ZP scratch)
+                STA     ACIA_CTRL
+WAIT_TX_PASS:
+                LDX     #$FF
+WAIT_TX_OUTER:
+                LDY     #$FF
+WAIT_TX_INNER:
                 LDA     #$01
-                BIT     VIA2_ORB
-                BNE     WAIT_TX_READY
+                BIT     VIA2_ORB        ; test TXE# (bit 0)
+                BEQ     WAIT_TX_DONE    ; TXE# low — proceed
+                DEY
+                BNE     WAIT_TX_INNER
+                DEX
+                BNE     WAIT_TX_OUTER
+                DEC     ACIA_CTRL
+                BNE     WAIT_TX_PASS    ; more passes remaining
+                ; Timed out after ~850ms — proceed anyway; CHROUT will block when needed
+WAIT_TX_DONE:
                 JMP     ESCAPE
 
 NOTCR:
