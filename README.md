@@ -165,16 +165,36 @@ The bank 1 C monitor can receive code over serial and run it directly from RAM.
 ### Quick start — Hello World
 
 ```bash
-# Switch to bank 1 from wozmon (if not already there)
-# At wozmon prompt:  B1
-
-# Build and upload the included Hello World example
+# 1. Build (top-level `make` builds SXB_eater.bin AND build/hello.bin)
 make
+
+# 2. Switch the board to the bank 1 C monitor.
+#    At the wozmon `\` prompt, type:  B1
+#    The banner "SXB Monitor  Bank 1  (C monitor)" appears, followed by `monitor> `.
+
+# 3. Close your terminal program (only one process can hold the serial port),
+#    then upload + run hello.bin:
 python3 tools/upload.py /dev/cu.usbserial-XXXXXXXX build/hello.bin --addr 4000 --run
 ```
 
-You should see `Hello, World!` printed on the terminal, then the
-`monitor>` prompt returns.
+Expected session output:
+
+```
+Connecting to /dev/cu.usbserial-XXXXXXXX at 115200 baud ...
+  Monitor ready.
+  File: build/hello.bin  (123 bytes, binary)
+  Uploading 123 bytes to 4000 ...
+  123/123 bytes  (100%)
+  Jumping to 4000 ...
+── Program output (Ctrl+C to exit) ──
+Hello, World!
+Enter your name: Zach
+you entered Zach
+monitor>
+```
+
+Press **Ctrl+C** to detach from the tail stream, or pass
+`--tail-idle 2` to auto-exit after 2 s of silence.
 
 ### `upload.py` reference
 
@@ -182,62 +202,120 @@ You should see `Hello, World!` printed on the terminal, then the
 python3 tools/upload.py <port> <file> [options]
 
   port              Serial port, e.g. /dev/cu.usbserial-XXXX
-  file              Binary (.bin) or S-record (.s19 / .srec / .mot)
+  file              Binary (.bin) or S-record (.s19 / .srec / .mot / .s28)
 
   --addr XXXX       Load address for .bin files (hex, no 0x, e.g. 4000)
-  --run             Execute after upload
+  --run             Execute after upload, then tee serial output to stdout
+                    until Ctrl+C (or --tail-idle expires)
+  --tail-idle SECS  Auto-exit --run tail mode after SECS of serial silence
+                    (default: 0 = wait for Ctrl+C)
   --baud N          Baud rate (default: 115200)
 ```
 
 **Binary mode** (`.bin` + `--addr`)  
 Converts the file to `ADDR: HH HH ...` store commands, waits for the
-monitor prompt between each line. Safe for any FIFO size.
+monitor prompt between each line. Safe for any FIFO size. With `--run`,
+issues `ADDRR` to JSR into the loaded image.
 
-**S-record mode** (`.s19` / `.srec` / `.mot`)  
+**S-record mode** (`.s19` / `.srec` / `.mot` / `.s28`)  
 Sends the monitor's `L` command, then streams records one at a time,
 waiting for a per-record ack. The monitor handles S0 (header), S1
 (16-bit address data), S5 (record count), and S9 (end / entry address).
 S2/S3/S7/S8 (24/32-bit variants) are rejected — `ld65` emits S1/S9 for
-65C02 targets, so this is not a limitation in practice.
+65C02 targets, so this is not a limitation in practice. With `--run`,
+the tool jumps to the entry address from the S9 record.
 
 ### Writing your own programs
 
-User programs run in RAM at `$4000`–`$6CFF` under the bank 1 ROM.  The
-`hello/` directory is a working template:
+User programs run from RAM at `$4000`–`$6CFF` while the bank 1 C monitor
+stays resident in ROM. The `hello/` directory is a complete, working
+template — the simplest path is to edit it in place, or copy it to a new
+directory and add a parallel build rule.
+
+#### Template layout
 
 ```
 hello/
-  hello.c           Your C source (include serial.h for I/O)
-  crt0.s            Minimal startup: saves/restores monitor ZP state,
-                    sets up cc65 stack, calls main(), RTSs to monitor
-  cfg/hello.cfg     ld65 config: flat binary at $4000, C stack at $6D00
+  hello.c           User C source. Includes "serial.h" for I/O.
+  crt0.s            Minimal startup: saves the monitor's cc65 ZP state,
+                    runs zerobss/copydata, sets up the user C stack at
+                    $6D00, calls main(), restores monitor ZP, RTSs back
+                    to the monitor's `R` command.
+  cfg/hello.cfg     ld65 config: flat binary at $4000, C stack at $6D00.
 ```
 
-The `crt0.s` in `hello/` saves the monitor's cc65 zero-page state before
-overwriting it, and restores it before returning.  This lets user code use
-the full cc65 runtime (software stack, string functions, etc.) without
-corrupting the monitor on return.
+The shared `monitor/serial.s` driver is linked into the user binary, so
+no symbols from the monitor ROM need to be resolved at runtime — your
+program is fully position-independent of the bank 1 ROM build.
 
-The `serial.s` driver from `monitor/` is linked into user programs at
-build time, so `serial_putchar()`, `serial_puts()`, `serial_puthex8/16()`
-and `serial_getchar()` are available at link time without depending on
-the monitor's internal symbol addresses.
+#### Available runtime APIs
 
-**RAM layout for user programs**
+Headers in `monitor/` are on the include path (`-I monitor`) when building
+hello, so any of the following can be `#include`d from user code:
+
+| Header | Functions / macros |
+|--------|--------------------|
+| `serial.h` | `serial_putchar(c)`, `serial_puts(s)`, `serial_getchar()`, `serial_puthex8(b)`, `serial_puthex16(w)` |
+| `via.h`    | VIA U3 register macros (`VIA_DDRB`, `VIA_T1CL`, …) + `via_t1_freerun(latch)`, `via_t2_oneshot(count)` |
+| `pia.h`    | PIA register macros (`PIA_PRA`, `PIA_CRA`, …) |
+| `acia.h`   | ACIA register macros (only useful if an ACIA is wired to the expansion header) |
+| `util.h`   | `parse_hex()`, `skip_spaces()`, plus the `serial_puthex*` helpers |
+
+Plus the cc65 standard library subset — `string.h`, `stdint.h`, `ctype.h`,
+basic `stdio.h` formatting (no file I/O). The user C stack is 512 bytes
+(`$6B00`–`$6CFF`), so keep recursion and large stack-allocated arrays
+modest.
+
+#### RAM layout for user programs
 
 ```
-$0000–$001F  cc65 ZP (saved/restored by crt0.s)
+$0000–$001F  cc65 ZP (saved on entry, restored on return by crt0.s)
 $4000–$6CFF  User code, rodata, data, BSS  (~11.5 KB)
-$6D00        C stack top (grows down, 512 bytes)
-$6B00–$7AFF  (safe margin — monitor C stack lives at $7700–$7B00)
+$6B00–$6CFF  User C stack (grows down from $6D00, 512 bytes)
+$7700–$7AFF  Monitor's own C stack — keep your code/data below this
 ```
 
-**Build your own program**
+#### Iterating on `hello.c`
 
-1. Copy `hello/` to a new directory (e.g. `myapp/`)
-2. Edit `myapp/myapp.c` — use `serial_puts()` / `serial_putchar()` for output
-3. Add a build rule to the Makefile modelled on the `hello` rules
-4. `make && python3 tools/upload.py <port> build/myapp.bin --addr 4000 --run`
+The fastest workflow is to edit `hello/hello.c` in place:
+
+```bash
+$EDITOR hello/hello.c
+make hello                                 # rebuilds just build/hello.bin
+python3 tools/upload.py /dev/cu.usbserial-XXXXXXXX \
+        build/hello.bin --addr 4000 --run --tail-idle 2
+```
+
+`make hello` is a fast incremental build — no need to rebuild the full
+flash image. Repeat the upload after each edit; the monitor stays resident
+so the board does not need to be reset between runs.
+
+#### Cloning hello as a new project
+
+```bash
+cp -R hello myapp
+mv myapp/hello.c myapp/myapp.c
+$EDITOR myapp/myapp.c                      # write your program
+```
+
+Then add a parallel build rule to the top-level `Makefile` — copy the
+`# ── Hello World example ──` block (the `HELLO_DIR`, `$(BUILD)/hello/*`
+and `$(BUILD)/hello.bin` rules) and substitute `myapp` for `hello`
+throughout. Add `$(BUILD)/myapp.bin` to the `all:` target if you want it
+built by default. Finally:
+
+```bash
+make myapp
+python3 tools/upload.py /dev/cu.usbserial-XXXXXXXX \
+        build/myapp.bin --addr 4000 --run
+```
+
+#### Returning to the monitor
+
+`main()` returning normally restores the monitor's zero page and RTSs
+back to the `monitor>` prompt. If your program loops forever, press the
+**reset button** (returns to wozmon) and then `B1` to re-enter the
+monitor.
 
 ## Flashing
 
