@@ -125,7 +125,7 @@ def build(basic_bin, lbl_file, orig_bin, output_bin, wdcmon_s28=None, monitor_bi
     def wdc(start, end):
         return bytearray(orig[0x18000+(start-0x8000):0x18000+(end-0x8000)])
 
-    wdc_init   = wdc(0xF818, 0xF8A5)
+    wdc_init   = wdc(0xF818, 0xF8A6)  # inclusive of $F8A5: high byte of JMP $FB99
     wdc_via2   = wdc(0xF9C2, 0xF9D0)
     wdc_rxpoll = wdc(0xFA10, 0xFA1A)
     wdc_usbchk = wdc(0xFB99, 0xFBA9)
