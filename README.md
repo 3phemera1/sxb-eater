@@ -6,15 +6,22 @@ development board, adapted from the [Ben Eater 6502 breadboard project](https://
 ## Overview
 
 This project runs Microsoft BASIC, Wozmon, and a C-based hardware monitor
-directly from the W65C02SXB's onboard flash ROM. The WDC SXB2 firmware
-(factory installed in bank 3) acts as a bootloader, handling USB serial
-initialization before handing off to our code — also in bank 3.
+directly from the W65C02SXB's onboard flash ROM.
 
-On power-up:
-1. WDC SXB2 firmware wakes, drives the LED diamond pattern
-2. Initializes VIA2 for USB serial (FT245 parallel FIFO)
-3. Detects `WDC\x00` signature at `$8000` in bank 3 → hands off
-4. Wozmon starts
+**Before flashing this firmware:**
+The factory WDC SXB2 bootloader lives in bank 3 (the default boot bank).
+On power-up, SXB2 drives the LED diamond pattern and initializes USB serial.
+
+**After flashing this firmware:**
+Bank 3 is completely replaced with our EhBASIC + Wozmon image. We extract
+the WDC initialization stubs from the factory firmware (via `SXB_orig.bin`)
+and relocate them into free space at the end of bank 3, so the LED diamond
+and USB setup still run on cold boot before Wozmon starts.
+
+Boot sequence after flash:
+1. Hardware reset → WDC init stubs run (LED diamond, VIA2 USB init)
+2. Stubs detect `WDC\x00` signature at `$8000` → hand off to our code
+3. Wozmon prompt appears
 
 ## Hardware
 
@@ -28,20 +35,112 @@ On power-up:
 The SST39SF010A is 128KB divided into four 32KB banks, selected via
 VIA2 PCR (`$7FEC`). Bank 3 is the hardware default on reset.
 
-| Bank | PCR   | File Offset | Contents |
-|------|-------|-------------|----------|
-| 0    | `$CC` | `$00000`    | SXB2 recovery image (WDC sig wiped) |
-| 1    | `$CE` | `$08000`    | **Bank 1 C Monitor** |
-| 2    | `$EC` | `$10000`    | Empty — user code |
-| 3    | `$EE` | `$18000`    | **EhBASIC + Wozmon (default boot)** |
+### Flash States Through the Lifecycle
 
-Bank 3 is the boot bank (hardware default). Our code replaces the WDC SXB2
-firmware in bank 3. The WDC init stubs are preserved and relocated within
-bank 3 to free space after wozmon.
+**Table 1: Factory Default (fresh board from WDC)**
 
-Bank 0 contains the SXB2 firmware with its WDC signature wiped. This means
-SXB2 always enters host mode when bank 0 is active — used for NMI recovery.
-See [NMI Recovery](#nmi-recovery) below.
+| Bank | Contents |
+|------|----------|
+| 0    | Empty ($FF) |
+| 1    | Empty ($FF) |
+| 2    | Empty ($FF) |
+| 3    | SXB2 bootloader (WDC\x00 signature at $8000, LED diamond, USB init) |
+
+---
+
+**Table 2a: After Flashing (no `SXB_orig.bin`, using `--no-orig`)**
+
+Fastest build when you don't have a chip reader. LED diamond is skipped, but
+everything else works. NMI recovery uses wozmon's own handler.
+
+| Bank | Contents |
+|------|----------|
+| 0    | Empty ($FF) — no recovery firmware |
+| 1    | Empty ($FF) — user space |
+| 2    | Empty ($FF) — user space |
+| 3    | EhBASIC + Wozmon + NMI handler; **no** WDC init stubs (direct boot) |
+
+---
+
+**Table 2b: After Flashing (with `SXB_orig.bin`, normal mode)**
+
+Preserves LED diamond on cold boot and SXB2 host-mode recovery firmware.
+WDC stubs extracted from `SXB_orig.bin`, patched, and relocated into bank 3
+after wozmon. Bank 0's SXB2 has signature wiped to force permanent host mode.
+
+| Bank | Contents |
+|------|----------|
+| 0    | SXB2 firmware (complete, signature **wiped** to force host mode) |
+| 1    | Empty ($FF) — user space |
+| 2    | Empty ($FF) — user space |
+| 3    | EhBASIC + Wozmon + **WDC init stubs** (relocated) + NMI handler |
+
+---
+
+**Table 3: After Flashing with Bank 1 C Monitor (normal mode)**
+
+Same as Table 2b, but bank 1 is occupied.
+
+| Bank | Contents |
+|------|----------|
+| 0    | SXB2 firmware (complete, signature wiped) |
+| 1    | **C Monitor** (32KB standalone ROM) |
+| 2    | Empty ($FF) — user space |
+| 3    | EhBASIC + Wozmon + WDC init stubs + NMI handler |
+
+---
+
+**Table 4: After Uploading `hello.bin` to Bank 1 Monitor (no flash change)**
+
+When you use `upload.py` to load code into the Bank 1 C Monitor, only RAM
+changes — no flash reprogramming occurs.
+
+| Bank | Contents |
+|------|----------|
+| 0    | (unchanged) SXB2 firmware (complete, signature wiped) |
+| 1    | (unchanged) C Monitor |
+| 2    | (unchanged) Empty ($FF) |
+| 3    | (unchanged) EhBASIC + Wozmon + WDC init stubs + NMI handler |
+| RAM  | **$4000–$6CFF now contains `hello.bin` code** (temporary, until power cycle) |
+
+---
+
+### Key Points
+
+- **Does `SXB_orig.bin` matter?** It's **optional**. It only buys you:
+  - LED diamond sequence on cold boot (cosmetic)
+  - SXB2 host-mode firmware in bank 0 (redundant backup for recovery)
+  
+  **Without it**: Bank 0 is empty, no LED diamond, but you still have full NMI
+  recovery via wozmon's own handler (in bank 3). Everything else is identical.
+
+- **Bank 0 after flash**: Always has SXB2 (complete firmware) with the signature
+  wiped. If `SXB_orig.bin` is missing, bank 0 is left empty ($FF). Either way,
+  NMI recovery works.
+
+### Bank 3 — Our Code Replaces SXB2
+
+The factory WDC SXB2 firmware is **completely replaced** in bank 3 by our
+EhBASIC + Wozmon image.
+
+- **With `SXB_orig.bin`**: We extract the five WDC initialization routines,
+  patch their addresses, and relocate them into bank 3 after wozmon. This
+  preserves the LED diamond sequence and USB setup on cold boot.
+
+- **Without `SXB_orig.bin`** (`--no-orig`): No WDC stubs — RESET vector points
+  directly to wozmon. Board boots instantly to wozmon prompt with no LED sequence.
+
+### Bank 0 — Recovery / NMI Mode
+
+- **With `SXB_orig.bin`**: Bank 0 contains a **complete copy** of the factory
+  SXB2 firmware (all stubs). The WDC signature is intentionally wiped so SXB2
+  always enters **host mode** (waits for reflash commands over serial).
+
+- **Without `SXB_orig.bin`**: Bank 0 is left empty ($FF). NMI recovery relies
+  entirely on wozmon's own NMI handler (in bank 3 ROM).
+
+Both modes support emergency reflash via NMI button. The difference is whether
+the classic SXB2 host-mode protocol or wozmon's simpler NMI handler is used.
 
 ## Memory Map (bank 3)
 
@@ -71,17 +170,46 @@ $FFFA-$FFFF  Interrupt vectors (RESET=$F996, NMI=NMI_HANDLER)
 
 ### Original firmware dump
 
-A dump of the original SST39SF010A chip is required as `SXB_orig.bin`
-in the repo root. `build_rom.py` extracts WDC init stubs from it.
+A dump of the original SST39SF010A chip is **optional but recommended** as
+`SXB_orig.bin` in the repo root. It allows us to extract and relocate the
+WDC SXB2 initialization stubs (LED diamond, VIA2 setup, USB enumeration).
 
+**To obtain `SXB_orig.bin`:**
+
+**Best method: Automatic extraction during first flash**  
+When you flash a **factory-fresh board** for the first time, `bootstrap_flash.py`
+automatically detects the original SXB2 firmware and offers to extract it:
+
+```bash
+python3 tools/bootstrap_flash.py /dev/cu.usbserial-XXXXX build/SXB_eater.bin
+# Output includes:
+#   "Factory board detected. Bank 3 contains original SXB2 firmware."
+#   "Would you like to save a backup of bank 3? (y/n): "
+```
+
+Just answer `y` and follow the prompts. The script uploads a small flash reader
+to RAM, extracts bank 3 (32KB), and saves it as `SXB_orig.bin` (or custom filename).
+This only happens on the first flash of a factory board — not on NMI recovery
+or subsequent reflashes.
+
+**Alternative method: Chip programmer**  
+If you have a **chip programmer** (minipro):
 ```bash
 minipro -p "SST39SF010A" -r SXB_orig.bin
 ```
 
-`SXB_orig.bin` is gitignored — it contains WDC proprietary firmware.
+**If you don't extract or provide `SXB_orig.bin`:**  
+Build with `make` (or `make NO_MONITOR=1`). If `SXB_orig.bin` is missing,
+the build automatically uses `--no-orig` mode:
+```bash
+make                  # builds without SXB_orig.bin
+```
 
-If you don't have `SXB_orig.bin`, `make` automatically builds with
-`--no-orig` — no LED diamond on boot, but everything else works.
+Everything works without it; you just skip the LED diamond and SXB2 host-mode
+backup recovery. Wozmon's built-in NMI handler still provides full emergency
+recovery.
+
+**Note**: `SXB_orig.bin` is gitignored — it contains WDC proprietary firmware.
 
 ## Building
 
@@ -321,9 +449,9 @@ monitor.
 
 ### Initial flash (factory board — no programmer needed)
 
-On a factory-fresh board, bank 0 is empty and SXB2 automatically enters
-host mode on boot. The bootstrap script exploits this to program the full
-128KB image over USB.
+On a factory-fresh board, bank 3 contains the factory SXB2 bootloader, which
+automatically enters host mode on boot and waits for reflash commands over USB
+serial. The bootstrap script exploits this to program the full 128KB image.
 
 ```bash
 # Close any terminal program first
@@ -332,9 +460,10 @@ python3 tools/bootstrap_flash.py /dev/cu.usbserial-XXXXXXXX build/SXB_eater.bin
 
 Takes ~15 seconds. Board resets to wozmon when done.
 
-> **After this initial flash**, bank 0 contains the SXB2 recovery image
-> (signature wiped). The NMI button can trigger a full reflash at any time.
-> You never need a chip programmer again.
+After this flash:
+- **Bank 3** is replaced with our EhBASIC + Wozmon image (WDC stubs relocated inside)
+- **Bank 0** receives a copy of SXB2 with signature wiped (for emergency recovery)
+- You never need a chip programmer again — NMI button provides full recovery
 
 ### Development iteration (wozmon already running)
 
@@ -429,20 +558,31 @@ $7FE0-$7FEF  VIA2 U5 (W65C22) — USB serial + bank select
 
 ## How It Works
 
-The WDC SXB2 firmware in bank 3 checks for `WDC\x00` at `$8000` after
-USB init. If found, it RTIs to `$8004` — our `JMP wozmon_RESET`.
+**Factory state:**
+The factory-installed SXB2 firmware (from `SXB_orig.bin` bank 3) is a 32KB
+bootloader that wakes on reset, drives the LED diamond, initializes VIA2,
+and looks for a `WDC\x00` signature at `$8000` to detect a user program.
 
-The WDC init stubs are extracted from `SXB_orig.bin`, patched, and
-relocated to free space after wozmon in bank 3. The RESET vector points
-to the relocated init stub so the full WDC sequence (LEDs, VIA2, USB)
-runs on every reset. The sigchk stub selects bank 3 (PCR=`$EE`) before
-reading `$8000`, since VIA2 PCR is cleared to 0 on hardware reset.
+**After flashing our firmware:**
+Bank 3 is **completely replaced** with our EhBASIC + Wozmon + WDC stubs
+image. We extract the five WDC init routines from the factory dump,
+patch their internal JSR targets to reflect their new addresses, and relocate
+them to free space after wozmon (starting at `WOZMON_END`). The RESET vector
+points to the relocated init stub, so on every cold boot:
 
-Bank 0 contains SXB2 firmware with WDC signature wiped (`$FF`). SXB2
-only enters host mode when it cannot find a valid WDC signature — so
-bank 0 is permanently in host mode, available for NMI recovery.
+1. Relocated WDC init runs (LED diamond, VIA2 setup, USB enumeration)
+2. Relocated sigchk routine checks for `WDC\x00` at `$8000`
+3. If found, sigchk hands off to `$8004` (JMP wozmon_RESET)
+4. Wozmon prompt appears
 
-`tools/build_rom.py` handles all patching automatically.
+Bank 0 contains the original SXB2 firmware **with WDC signature wiped** to
+ensure it always enters host mode. This is used only for NMI recovery — when
+the NMI button is pressed, the NMI handler loads a flash writer stub into RAM
+and accepts a complete 128KB image over serial.
+
+Warm reset paths (wozmon `B` commands, bootstrap flash writer) bypass the
+RESET vector by jumping directly to `$8004`, so the WDC stubs only run on
+true cold boot, avoiding unnecessary LED sequences during development.
 
 ## Flash Your Own Code
 
@@ -463,7 +603,6 @@ wozmon's `B1`/`B2` bank switch commands.
 
 ## Known Issues / TODO
 
-- [ ] `\` prompt not visible on connect (FT245 buffering — type to flush)
 - [ ] CR/LF: enable "Add LF after CR" in terminal
 - [ ] Register display not yet in wozmon
 - [ ] Bank 1 monitor: no line history / up-arrow recall

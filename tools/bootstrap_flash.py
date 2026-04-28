@@ -6,17 +6,25 @@ Works on a FACTORY FRESH SXB (bank 3 = SXB2, banks 0-2 empty).
 SXB2 enters host handshake mode when no WDC signature found.
 
 Strategy:
-  1. Use SXB2 CMD $07 to upload a monolithic RAM flash writer (~246 bytes)
-  2. Use SXB2 CMD $06 to execute the flash writer
-  3. Flash writer receives the full 128KB image over serial (raw bytes)
-  4. Flash writer programs all 4 banks sequentially
-  5. Board resets when done
+  1. Detect board state (factory SXB2 vs. already-flashed SXB_eater)
+  2. If factory: offer to extract and save bank 3 (original SXB2 firmware)
+  3. Use SXB2 CMD $07 to upload a monolithic RAM flash writer (~246 bytes)
+  4. Use SXB2 CMD $06 to execute the flash writer
+  5. Flash writer receives the full 128KB image over serial (raw bytes)
+  6. Flash writer programs all 4 banks sequentially
+  7. Board resets when done
 
 The flash writer runs entirely from RAM ($1000), so bank switching
 during programming never kills the command loop.
 
+Optional extraction: On first flash of a factory board, this script offers
+to extract bank 3 via a small 65C02 flash reader and save it as SXB_orig.bin
+(or custom filename). This allows future builds to include the WDC init
+stubs (LED diamond, USB enumeration). The extraction only happens on factory
+boards in SXB2 host mode — not on subsequent flashes or NMI recovery.
+
 Final flash layout (from SXB_eater.bin):
-  Bank 0: WDCMON           (accessible via wozmon B0 command)
+  Bank 0: SXB2 recovery (or empty if no orig)
   Bank 1: empty
   Bank 2: empty
   Bank 3: EhBASIC+Wozmon  (default auto-boot)
@@ -482,6 +490,206 @@ def nmi_upload_and_arm(s, writer, already_armed=False, max_attempts=4):
     return False
 
 
+def build_flash_reader():
+    """
+    Build a small 65C02 flash reader that streams bank 3 (32KB) over serial.
+    Runs from RAM at WRITER_BASE ($0800).
+    
+    Protocol:
+      1. Sends 'R' (ready)
+      2. Streams exactly 32768 bytes (bank 3, $8000–$FFFF)
+      3. Sends 'D' (done) and RTS
+    """
+    code = bytearray()
+    labels = {}
+    fixups = []
+
+    def b(*args): code.extend(args)
+    def label(name): labels[name] = len(code)
+    def bne(name):
+        fixups.append((len(code)+1, name, len(code)+2, 'rel'))
+        b(0xD0, 0x00)
+    def jsr(name):
+        fixups.append((len(code)+1, name, None, 'abs'))
+        b(0x20, 0x00, 0x00)
+
+    PTR_LO   = 0x20
+    PTR_HI   = 0x21
+    CNT_LO   = 0x22
+    CNT_HI   = 0x23
+    VIA2_ORB_ADDR  = VIA2_ORB & 0xFF
+    VIA2_ORB_PAGE  = VIA2_ORB >> 8
+    VIA2_ORA_ADDR  = VIA2_ORA & 0xFF
+    VIA2_DDRA_ADDR = VIA2_DDRA & 0xFF
+
+    label('start')
+    b(0x78)                      # SEI
+    b(0xA2, 0x00)                # LDX #0
+    b(0xA9, 0xFF)                # LDA #$FF
+    b(0x8D, VIA2_DDRA_ADDR, VIA2_ORB_PAGE)  # STA $7FE3 (DDRA = output)
+    
+    # Send 'R' ready
+    b(0xA9, ord('R'))
+    jsr('tx')
+    
+    # Initialize pointer to $8000 and count to 32768
+    b(0xA9, 0x00); b(0x85, PTR_LO)     # LDA #$00; STA PTR_LO
+    b(0xA9, 0x80); b(0x85, PTR_HI)     # LDA #$80; STA PTR_HI
+    b(0xA9, 0x00); b(0x85, CNT_LO)     # LDA #$00; STA CNT_LO  (32768 = $8000)
+    b(0xA9, 0x80); b(0x85, CNT_HI)     # LDA #$80; STA CNT_HI
+    
+    label('read_loop')
+    # Read byte at (PTR_LO, PTR_HI)
+    b(0xB1, PTR_LO)                    # LDA (PTR_LO, X)  [X=0]
+    jsr('tx')
+    
+    # Increment pointer
+    b(0xE6, PTR_LO)                    # INC PTR_LO
+    b(0xD0, 0x03)                      # BNE +3
+    b(0xE6, PTR_HI)                    # INC PTR_HI
+    b(0xEA)                            # NOP
+    
+    # Decrement counter
+    b(0xA5, CNT_LO); b(0x3A)           # LDA CNT_LO; DEC
+    b(0x85, CNT_LO)                    # STA CNT_LO
+    b(0xD0, 0x03)                      # BNE +3
+    b(0xA5, CNT_HI); b(0x3A)           # LDA CNT_HI; DEC
+    b(0x85, CNT_HI)                    # STA CNT_HI
+    
+    # If count != 0, loop
+    b(0xA5, CNT_LO); b(0x05, CNT_HI)   # LDA CNT_LO; ORA CNT_HI
+    bne('read_loop')
+    
+    # Send 'D' done
+    b(0xA9, ord('D'))
+    jsr('tx')
+    b(0x60)                            # RTS
+    
+    # ── uart_tx (copied from build_flash_writer) ──
+    label('tx')
+    b(0x48)                            # PHA
+    b(0xA9, 0x00)
+    b(0x8D, VIA2_DDRA_ADDR, VIA2_ORB_PAGE)  # STA VIA2_DDRA
+    b(0x68)                            # PLA
+    b(0x48)                            # PHA
+    b(0x8D, VIA2_ORA_ADDR, VIA2_ORB_PAGE)   # STA VIA2_ORA
+    label('tx_wait')
+    b(0xA9, 0x01)
+    b(0x2C, VIA2_ORB_ADDR, VIA2_ORB_PAGE)   # BIT VIA2_ORB
+    bne('tx_wait')
+    b(0xA9, 0xFF)
+    b(0x8D, VIA2_DDRA_ADDR, VIA2_ORB_PAGE)  # STA VIA2_DDRA
+    b(0xA9, 0x04)
+    b(0x0C, VIA2_ORB_ADDR, VIA2_ORB_PAGE)   # TSB VIA2_ORB
+    b(0xEA); b(0xEA)
+    b(0xA9, 0x04)
+    b(0x1C, VIA2_ORB_ADDR, VIA2_ORB_PAGE)   # TRB VIA2_ORB
+    b(0xA9, 0x00)
+    b(0x8D, VIA2_DDRA_ADDR, VIA2_ORB_PAGE)  # STA VIA2_DDRA
+    b(0x68)                            # PLA
+    b(0x60)                            # RTS
+    
+    # Apply fixups
+    for off, name, rel_base, kind in fixups:
+        target_abs = WRITER_BASE + labels[name]
+        if kind == 'abs':
+            code[off]   = target_abs & 0xFF
+            code[off+1] = target_abs >> 8
+        else:
+            code[off] = (target_abs - (WRITER_BASE + rel_base)) & 0xFF
+
+    return bytes(code)
+
+
+def extract_bank3(s, prompt_filename='SXB_orig.bin'):
+    """
+    Upload and execute a flash reader to extract bank 3 (32KB) from the board.
+    Returns the 32KB bytes, or None if user declines.
+    Also prompts to save to file if user wishes.
+    """
+    print()
+    print("─" * 55)
+    print("Factory board detected. Bank 3 contains original SXB2 firmware.")
+    print("─" * 55)
+    print()
+    print("Would you like to save a backup of bank 3?")
+    print("(Recommended for future builds without a chip reader)")
+    print()
+    
+    # Prompt with suggested filename
+    response = input(f"Save to file [{prompt_filename}]? (y/n): ").strip().lower()
+    if response not in ('y', 'yes', ''):
+        print("Skipping backup.")
+        return None
+    
+    # Get filename
+    filename = input(f"Filename [{prompt_filename}]: ").strip()
+    if not filename:
+        filename = prompt_filename
+    
+    # Check if file exists
+    import os
+    if os.path.exists(filename):
+        response = input(f"{filename} exists. Overwrite? (y/n): ").strip().lower()
+        if response not in ('y', 'yes'):
+            print("Skipping backup.")
+            return None
+    
+    print()
+    print("Building flash reader...")
+    reader = build_flash_reader()
+    print(f"  {len(reader)} bytes at ${WRITER_BASE:04x}")
+    
+    print("Uploading flash reader...")
+    if not sxb2_upload(s, reader, WRITER_BASE):
+        print("  ERROR: upload failed")
+        return None
+    print("  Upload OK")
+    
+    print("Executing flash reader...")
+    s.reset_input_buffer()
+    
+    if not sxb2_cmd_exec(s, WRITER_BASE):
+        print("  ERROR: exec failed")
+        return None
+    
+    # Wait for 'R' (ready)
+    s.timeout = 2.0
+    resp = s.read(1)
+    if resp != b'R':
+        print(f"  ERROR: expected 'R', got {resp!r}")
+        return None
+    
+    print("  Receiving bank 3... (32KB)", end='', flush=True)
+    bank3 = bytearray()
+    s.timeout = 0.5
+    
+    # Read exactly 32768 bytes
+    while len(bank3) < 32768:
+        chunk = s.read(32768 - len(bank3))
+        if not chunk:
+            print(f"\n  ERROR: timeout after {len(bank3)} bytes")
+            return None
+        bank3.extend(chunk)
+        if len(bank3) % 4096 == 0:
+            print('.', end='', flush=True)
+    
+    # Wait for 'D' (done)
+    resp = s.read(1)
+    if resp != b'D':
+        print(f"\n  WARNING: expected 'D', got {resp!r}")
+    
+    print(f"\n  Received {len(bank3)} bytes")
+    
+    # Save to file
+    print(f"Saving to {filename}...")
+    with open(filename, 'wb') as f:
+        f.write(bank3)
+    print(f"  Saved {len(bank3)} bytes")
+    
+    return bytes(bank3)
+
+
 def bootstrap(port, image_path, mode='auto'):
     print("=" * 55)
     print("  SXB Bootstrap Flasher")
@@ -571,6 +779,11 @@ def bootstrap(port, image_path, mode='auto'):
                 print("ERROR: No SXB2 response.")
                 sys.exit(1)
         print("  Handshake OK!")
+        print()
+        
+        # Offer to extract bank 3 (factory firmware) on first flash only
+        extract_bank3(s, prompt_filename='SXB_orig.bin')
+        
         print()
         print("Uploading flash writer to RAM...")
         assert len(writer) <= 512, f"Writer too large: {len(writer)}"
