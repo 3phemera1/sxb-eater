@@ -18,6 +18,10 @@ VIA2_ORB  = $7FE0
 VIA2_ORA  = $7FE1
 VIA2_DDRB = $7FE2
 VIA2_DDRA = $7FE3
+VIA2_ACR  = $7FEB
+VIA2_PCR  = $7FEC
+VIA2_IFR  = $7FED
+VIA2_IER  = $7FEE
 
 ; Defines needed by wozmon - map ACIA symbols to VIA2 (writes ignored)
 ACIA_CTRL = $EE        ; scratch ZP - writes ignored
@@ -30,8 +34,13 @@ SAVE:
                 rts
 
 ; INIT_BUFFER - initialize VIA2 for USB serial
-; Exact sequence from WDC firmware $F9C2
+; Must fully initialize from power-on state (all regs = $00).
+; On cold boot, ACR/IER may not be properly cleared by POR.
 INIT_BUFFER:
+                stz     VIA2_ACR        ; transparent port reads (no latching)
+                lda     #$7F
+                sta     VIA2_IER        ; disable all VIA2 interrupts
+                sta     VIA2_IFR        ; clear all pending interrupt flags
                 lda     #$0C
                 sta     VIA2_ORB        ; WR+RD strobes high FIRST
                 lda     #$0C
@@ -69,8 +78,10 @@ CHROUT:
                 stz     VIA2_DDRA       ; tristate port A
                 sta     VIA2_ORA        ; latch char into ORA
 TxWait:         lda     #$01
-                bit     VIA2_ORB        ; test TX ready (bit 0)
-                bne     TxWait          ; wait until clear
+                bit     VIA2_ORB        ; test TXE# (bit 0, active-low)
+                bne     TxWait
+                bit     VIA2_ORB        ; re-check: filter sub-cycle glitches
+                bne     TxWait
                 lda     #$04
                 tsb     VIA2_ORB        ; WR strobe high
                 lda     #$FF

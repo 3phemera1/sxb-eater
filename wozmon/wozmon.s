@@ -12,7 +12,6 @@ MODE            = $2B
 
 IN              = $0200
 
-VIA2_PCR        = $7FEC         ; bank select register
 BANK_TRAMPOLINE = $02FA         ; 6-byte RAM trampoline: STA $7FEC ; JMP $8004
 PCR_BANK0       = $CC           ; bank 0 (WDCMON)
 PCR_BANK1       = $C4           ; bank 1 (user)  CA2=low CB2=low CA1edge=0 CB1=high?
@@ -33,6 +32,8 @@ PCR_BANK2_VAL   = $EC
 RESET:
                 ; Dirty reset circuit workaround removed (not needed on SXB)
                 CLD
+                LDA     #$EE
+                STA     VIA2_PCR        ; CA2/CB2 = output HIGH → lock bank 3
                 LDX     #$FF
                 TXS                     ; init stack pointer
                 JSR     INIT_BUFFER
