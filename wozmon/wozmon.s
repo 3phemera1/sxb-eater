@@ -31,6 +31,7 @@ PCR_BANK2_VAL   = $EC
 
 RESET:
                 ; Dirty reset circuit workaround removed (not needed on SXB)
+                SEI                     ; mask IRQ (protects warm resets via B3)
                 CLD
                 LDA     #$EE
                 STA     VIA2_PCR        ; CA2/CB2 = output HIGH → lock bank 3
@@ -40,8 +41,11 @@ RESET:
                 ; Clear stale input buffer to prevent replay after reset
                 LDA     #$0D
                 STA     IN
+                ; Interrupts stay disabled (SEI at entry).  Polled I/O via
+                ; CHRIN/CHROUT needs no IRQ.  Leaving I=1 prevents IRQ storms
+                ; from any peripheral whose IER was not properly cleared by POR
+                ; (VIA U3, PIA share the IRQ line with VIA2).
 ;                JSR     LCDINIT         ; LCD init using lcd.s
-                CLI
                 LDA     #$1F            ; 8-N-1, 19200 bps
                 STA     ACIA_CTRL
                 LDY     #$89            ; No parity, no echo, rx interrupts
@@ -73,28 +77,13 @@ DELAY_IN:
                 BNE     DELAY_OUT
                 ; Wait for FT245 TX FIFO ready (TXE# = bit 0 of VIA2_ORB, active-low).
                 ; On cold power-up the FT245 needs USB enumeration (1-3s typical)
-                ; before TXE# goes low.  CHROUT blocks unboundedly on TXE#, so we
-                ; must wait here long enough for enumeration to finish.
-                ; 48 passes × ~106ms ≈ ~5s at 8 MHz — covers worst-case enumeration.
+                ; before TXE# goes low.  This loops unboundedly — CHROUT also
+                ; blocks on TXE#, so there is no benefit to a timeout here.
                 ; On warm restart (B3) TXE# is already low so this exits immediately.
-                LDA     #$30            ; pass counter (ACIA_CTRL = ZP scratch)
-                STA     ACIA_CTRL
-WAIT_TX_PASS:
-                LDX     #$FF
-WAIT_TX_OUTER:
-                LDY     #$FF
-WAIT_TX_INNER:
+WAIT_TX_READY:
                 LDA     #$01
                 BIT     VIA2_ORB        ; test TXE# (bit 0)
-                BEQ     WAIT_TX_DONE    ; TXE# low — proceed
-                DEY
-                BNE     WAIT_TX_INNER
-                DEX
-                BNE     WAIT_TX_OUTER
-                DEC     ACIA_CTRL
-                BNE     WAIT_TX_PASS    ; more passes remaining
-                ; Timed out after ~850ms — proceed anyway; CHROUT will block when needed
-WAIT_TX_DONE:
+                BNE     WAIT_TX_READY
                 JMP     ESCAPE
 
 NOTCR:

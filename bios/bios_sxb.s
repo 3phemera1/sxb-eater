@@ -23,6 +23,15 @@ VIA2_PCR  = $7FEC
 VIA2_IFR  = $7FED
 VIA2_IER  = $7FEE
 
+; VIA U3 (sound/GPIO) at $7FC0 — shares CPU IRQ line
+VIA_U3_ACR = $7FCB
+VIA_U3_IFR = $7FCD
+VIA_U3_IER = $7FCE
+
+; PIA (W65C21) at $7FA0 — shares CPU IRQ line
+PIA_CRA    = $7FA1
+PIA_CRB    = $7FA3
+
 ; Defines needed by wozmon - map ACIA symbols to VIA2 (writes ignored)
 ACIA_CTRL = $EE        ; scratch ZP - writes ignored
 ACIA_CMD  = $EF        ; scratch ZP - writes ignored
@@ -33,12 +42,22 @@ LOAD:
 SAVE:
                 rts
 
-; INIT_BUFFER - initialize VIA2 for USB serial
-; Must fully initialize from power-on state (all regs = $00).
-; On cold boot, ACR/IER may not be properly cleared by POR.
+; INIT_BUFFER - initialize all I/O for USB serial
+; Must fully initialize from power-on state (all regs may be undefined).
+; VIA2, VIA U3, and PIA share the CPU IRQ line.  On cold boot, POR may
+; leave IER/CRA/CRB in undefined states causing an IRQ storm.
 INIT_BUFFER:
-                stz     VIA2_ACR        ; transparent port reads (no latching)
+                ; --- Quiesce VIA U3 (sound/GPIO) on shared IRQ line ---
                 lda     #$7F
+                sta     VIA_U3_IER      ; disable all VIA U3 interrupts
+                sta     VIA_U3_IFR      ; clear all VIA U3 flags
+                stz     VIA_U3_ACR      ; no timer output, no latching
+                ; --- Quiesce PIA on shared IRQ line ---
+                stz     PIA_CRA         ; disable IRQA
+                stz     PIA_CRB         ; disable IRQB
+                ; --- VIA2 (USB serial) ---
+                stz     VIA2_ACR        ; transparent port reads (no latching)
+                                        ; A still $7F from above
                 sta     VIA2_IER        ; disable all VIA2 interrupts
                 sta     VIA2_IFR        ; clear all pending interrupt flags
                 lda     #$0C
