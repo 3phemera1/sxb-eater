@@ -1,14 +1,14 @@
-# SXB EhBASIC + Wozmon
+# SXB EhBASIC + Wozmon + Bank 1 C Monitor
 
-MS BASIC and Wozmon for the [WDC W65C02SXB](https://wdc65xx.com/single-board-computers/w65c02sxb/)
+MS BASIC, Wozmon, and a C-based hardware monitor for the [WDC W65C02SXB](https://wdc65xx.com/single-board-computers/w65c02sxb/)
 development board, adapted from the [Ben Eater 6502 breadboard project](https://eater.net/6502).
 
 ## Overview
 
-This project runs Microsoft BASIC and Wozmon directly from the W65C02SXB's
-onboard flash ROM. The WDC SXB2 firmware (factory installed in bank 3) acts
-as a bootloader, handling USB serial initialization before handing off to
-our code — also in bank 3.
+This project runs Microsoft BASIC, Wozmon, and a C-based hardware monitor
+directly from the W65C02SXB's onboard flash ROM. The WDC SXB2 firmware
+(factory installed in bank 3) acts as a bootloader, handling USB serial
+initialization before handing off to our code — also in bank 3.
 
 On power-up:
 1. WDC SXB2 firmware wakes, drives the LED diamond pattern
@@ -31,7 +31,7 @@ VIA2 PCR (`$7FEC`). Bank 3 is the hardware default on reset.
 | Bank | PCR   | File Offset | Contents |
 |------|-------|-------------|----------|
 | 0    | `$CC` | `$00000`    | SXB2 recovery image (WDC sig wiped) |
-| 1    | `$CE` | `$08000`    | Empty — user code |
+| 1    | `$CE` | `$08000`    | **Bank 1 C Monitor** |
 | 2    | `$EC` | `$10000`    | Empty — user code |
 | 3    | `$EE` | `$18000`    | **EhBASIC + Wozmon (default boot)** |
 
@@ -94,6 +94,66 @@ make
 ```
 
 Produces `build/SXB_eater.bin` — the 128KB flash image.
+
+## Bank 1 C Monitor
+
+Bank 1 holds a lightweight hardware monitor written in C (compiled with cc65)
+and linked as a standalone 32KB ROM image. It provides the same wozmon-style
+commands plus a small SDK for experimenting with the board's peripherals from C.
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `AAAA` | Examine byte at address `AAAA` |
+| `AAAA.BBBB` | Examine memory range `AAAA`–`BBBB` (8 bytes/line) |
+| `AAAA: HH ...` | Write one or more bytes to memory starting at `AAAA` |
+| `AAAAR` | JSR to `AAAA`; returns to monitor prompt when code RTSs |
+| `B0`–`B3` | Switch to flash bank 0–3 (uses wozmon RAM trampoline) |
+| `?` | Show help |
+
+Switch to bank 1 from wozmon with the `B1` command. The monitor banner
+(`SXB Monitor  Bank 1  (C monitor)`) appears and the `monitor>` prompt
+is ready for input. Switch back to bank 3 (wozmon + BASIC) with `B3`.
+
+### Hardware SDK headers
+
+The monitor includes headers that can be reused by user code compiled into
+bank 1:
+
+| Header | Contents |
+|--------|----------|
+| `via.h` | VIA U3 (`$7FC0`) register macros + `via_t1_freerun(latch)`, `via_t2_oneshot(count)` |
+| `pia.h` | PIA (`$BFC0`) register macros |
+| `acia.h` | ACIA register macros (if an ACIA is wired to the expansion header) |
+| `serial.h` / `serial.s` | Low-level VIA2 FT245 FIFO putchar/getchar (hand-written 65C02 assembly) |
+| `util.h` | `parse_hex()`, `skip_spaces()`, `serial_puthex8/16()` |
+
+### Building without the monitor
+
+```bash
+make NO_MONITOR=1     # bank 1 left as $FF
+```
+
+### Bank 1 source layout
+
+```
+monitor/
+  main.c        Command processor and top-level monitor loop
+  crt0.s        Startup: WDC sig, VIA2 init, cc65 runtime init, vectors
+  serial.s      VIA2 FT245 FIFO serial I/O (hand-written assembly)
+  via.c / via.h VIA U3 driver + register SDK
+  pia.c / pia.h PIA driver + register SDK
+  acia.c / acia.h ACIA driver + register SDK
+  util.c / util.h Hex parsing and output helpers
+  cfg/monitor.cfg ld65 linker config for the 32KB bank 1 image
+```
+
+The startup stub (`crt0.s`) places the `WDC\x00` signature at `$8000`,
+initializes VIA2 for USB serial, runs the cc65 BSS-zero and data-copy
+routines, then calls `main()`. Bank switching uses the RAM trampoline
+left by wozmon at `$02FA` so the CPU safely fetches the JMP target from
+RAM after the flash bank changes under it.
 
 ## Flashing
 
@@ -245,6 +305,7 @@ wozmon's `B1`/`B2` bank switch commands.
 - [ ] CR/LF: enable "Add LF after CR" in terminal
 - [ ] S19/S28 record loader not yet in wozmon
 - [ ] Register display not yet in wozmon
+- [ ] Bank 1 monitor: no line history / up-arrow recall
 
 ## Attribution
 

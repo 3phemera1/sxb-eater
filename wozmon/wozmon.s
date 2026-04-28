@@ -70,15 +70,14 @@ DELAY_IN:
                 BNE     DELAY_IN
                 DEX
                 BNE     DELAY_OUT
-                ; Second delay pass for USB enumeration (~500ms total)
-                LDX     #$FF
-DELAY_OUT2:
-                LDY     #$FF
-DELAY_IN2:
-                DEY
-                BNE     DELAY_IN2
-                DEX
-                BNE     DELAY_OUT2
+                ; Poll until FT245 TX FIFO is ready (TXE# = bit 0 of VIA2_ORB,
+                ; active-low).  On cold boot this waits for USB enumeration and
+                ; the terminal to open the COM port; on a warm restart (B3)
+                ; TXE# is already low so we exit immediately.
+WAIT_TX_READY:
+                LDA     #$01
+                BIT     VIA2_ORB
+                BNE     WAIT_TX_READY
                 JMP     ESCAPE
 
 NOTCR:

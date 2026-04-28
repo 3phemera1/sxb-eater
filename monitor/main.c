@@ -113,12 +113,12 @@ static void run_at(uint16_t addr)
 
 static void show_help(void)
 {
-    serial_puts("\r\nBank 1 C Monitor — commands:\r\n");
+    serial_puts("\r\nBank 1 C Monitor - commands:\r\n");
     serial_puts("  AAAA          examine byte at AAAA\r\n");
     serial_puts("  AAAA.BBBB     examine range AAAA to BBBB\r\n");
     serial_puts("  AAAA: HH ...  store bytes at AAAA\r\n");
     serial_puts("  AAAAR         run (JSR) at AAAA\r\n");
-    serial_puts("  B0–B3         switch to flash bank 0–3\r\n");
+    serial_puts("  B0-B3         switch to flash bank 0-3\r\n");
     serial_puts("  ?             this help\r\n");
     serial_puts("\r\nSDK available: via.h  pia.h  acia.h\r\n");
 }
@@ -138,11 +138,14 @@ static uint8_t read_line(void)
     while (1) {
         c = serial_getchar();
 
-        if (c == '\r' || c == '\n') {
+        if (c == '\r') {
             serial_putcrlf();
             line[pos] = '\0';
             return pos;
         }
+
+        if (c == '\n')
+            continue;           /* swallow LF — handles \r\n terminal pairs */
 
         if ((c == '\b' || c == 0x7F) && pos > 0) {
             /* Backspace: erase last character on the terminal */
