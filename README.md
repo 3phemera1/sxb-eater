@@ -109,6 +109,7 @@ commands plus a small SDK for experimenting with the board's peripherals from C.
 | `AAAA.BBBB` | Examine memory range `AAAA`–`BBBB` (8 bytes/line) |
 | `AAAA: HH ...` | Write one or more bytes to memory starting at `AAAA` |
 | `AAAAR` | JSR to `AAAA`; returns to monitor prompt when code RTSs |
+| `L` | Load Motorola S-records (S1/S9) from serial — see [Uploading Programs](#uploading-programs) |
 | `B0`–`B3` | Switch to flash bank 0–3 (uses wozmon RAM trampoline) |
 | `?` | Show help |
 
@@ -139,11 +140,12 @@ make NO_MONITOR=1     # bank 1 left as $FF
 
 ```
 monitor/
-  main.c        Command processor and top-level monitor loop
-  crt0.s        Startup: WDC sig, VIA2 init, cc65 runtime init, vectors
-  serial.s      VIA2 FT245 FIFO serial I/O (hand-written assembly)
-  via.c / via.h VIA U3 driver + register SDK
-  pia.c / pia.h PIA driver + register SDK
+  main.c          Command processor and top-level monitor loop
+  srec.c / srec.h Motorola S-record loader (L command)
+  crt0.s          Startup: WDC sig, VIA2 init, cc65 runtime init, vectors
+  serial.s        VIA2 FT245 FIFO serial I/O (hand-written assembly)
+  via.c / via.h   VIA U3 driver + register SDK
+  pia.c / pia.h   PIA driver + register SDK
   acia.c / acia.h ACIA driver + register SDK
   util.c / util.h Hex parsing and output helpers
   cfg/monitor.cfg ld65 linker config for the 32KB bank 1 image
@@ -154,6 +156,88 @@ initializes VIA2 for USB serial, runs the cc65 BSS-zero and data-copy
 routines, then calls `main()`. Bank switching uses the RAM trampoline
 left by wozmon at `$02FA` so the CPU safely fetches the JMP target from
 RAM after the flash bank changes under it.
+
+## Uploading Programs
+
+The bank 1 C monitor can receive code over serial and run it directly from RAM.
+`tools/upload.py` automates both the transfer and the optional run step.
+
+### Quick start — Hello World
+
+```bash
+# Switch to bank 1 from wozmon (if not already there)
+# At wozmon prompt:  B1
+
+# Build and upload the included Hello World example
+make
+python3 tools/upload.py /dev/cu.usbserial-XXXXXXXX build/hello.bin --addr 4000 --run
+```
+
+You should see `Hello, World!` printed on the terminal, then the
+`monitor>` prompt returns.
+
+### `upload.py` reference
+
+```
+python3 tools/upload.py <port> <file> [options]
+
+  port              Serial port, e.g. /dev/cu.usbserial-XXXX
+  file              Binary (.bin) or S-record (.s19 / .srec / .mot)
+
+  --addr XXXX       Load address for .bin files (hex, no 0x, e.g. 4000)
+  --run             Execute after upload
+  --baud N          Baud rate (default: 115200)
+```
+
+**Binary mode** (`.bin` + `--addr`)  
+Converts the file to `ADDR: HH HH ...` store commands, waits for the
+monitor prompt between each line. Safe for any FIFO size.
+
+**S-record mode** (`.s19` / `.srec` / `.mot`)  
+Sends the monitor's `L` command, then streams records one at a time,
+waiting for a per-record ack. The monitor handles S0 (header), S1
+(16-bit address data), S5 (record count), and S9 (end / entry address).
+S2/S3/S7/S8 (24/32-bit variants) are rejected — `ld65` emits S1/S9 for
+65C02 targets, so this is not a limitation in practice.
+
+### Writing your own programs
+
+User programs run in RAM at `$4000`–`$6CFF` under the bank 1 ROM.  The
+`hello/` directory is a working template:
+
+```
+hello/
+  hello.c           Your C source (include serial.h for I/O)
+  crt0.s            Minimal startup: saves/restores monitor ZP state,
+                    sets up cc65 stack, calls main(), RTSs to monitor
+  cfg/hello.cfg     ld65 config: flat binary at $4000, C stack at $6D00
+```
+
+The `crt0.s` in `hello/` saves the monitor's cc65 zero-page state before
+overwriting it, and restores it before returning.  This lets user code use
+the full cc65 runtime (software stack, string functions, etc.) without
+corrupting the monitor on return.
+
+The `serial.s` driver from `monitor/` is linked into user programs at
+build time, so `serial_putchar()`, `serial_puts()`, `serial_puthex8/16()`
+and `serial_getchar()` are available at link time without depending on
+the monitor's internal symbol addresses.
+
+**RAM layout for user programs**
+
+```
+$0000–$001F  cc65 ZP (saved/restored by crt0.s)
+$4000–$6CFF  User code, rodata, data, BSS  (~11.5 KB)
+$6D00        C stack top (grows down, 512 bytes)
+$6B00–$7AFF  (safe margin — monitor C stack lives at $7700–$7B00)
+```
+
+**Build your own program**
+
+1. Copy `hello/` to a new directory (e.g. `myapp/`)
+2. Edit `myapp/myapp.c` — use `serial_puts()` / `serial_putchar()` for output
+3. Add a build rule to the Makefile modelled on the `hello` rules
+4. `make && python3 tools/upload.py <port> build/myapp.bin --addr 4000 --run`
 
 ## Flashing
 
@@ -303,7 +387,6 @@ wozmon's `B1`/`B2` bank switch commands.
 
 - [ ] `\` prompt not visible on connect (FT245 buffering — type to flush)
 - [ ] CR/LF: enable "Add LF after CR" in terminal
-- [ ] S19/S28 record loader not yet in wozmon
 - [ ] Register display not yet in wozmon
 - [ ] Bank 1 monitor: no line history / up-arrow recall
 

@@ -10,6 +10,7 @@
  *   AAAA.BBBB      Examine range AAAA–BBBB (8 bytes per line)
  *   AAAA: HH ...   Store one or more bytes starting at AAAA
  *   AAAAR          Run code at AAAA (JSR; returns to monitor if code RTSs)
+ *   L              Load Motorola S-records (S1/S9) from serial
  *   B0–B3          Switch to flash bank 0–3 (never returns for 0–2)
  *   ?              Show this help
  *
@@ -22,6 +23,7 @@
 
 #include "serial.h"
 #include "util.h"
+#include "srec.h"
 #include "via.h"
 #include "pia.h"
 #include "acia.h"
@@ -118,6 +120,7 @@ static void show_help(void)
     serial_puts("  AAAA.BBBB     examine range AAAA to BBBB\r\n");
     serial_puts("  AAAA: HH ...  store bytes at AAAA\r\n");
     serial_puts("  AAAAR         run (JSR) at AAAA\r\n");
+    serial_puts("  L             load Motorola S-records (S1/S9)\r\n");
     serial_puts("  B0-B3         switch to flash bank 0-3\r\n");
     serial_puts("  ?             this help\r\n");
     serial_puts("\r\nSDK available: via.h  pia.h  acia.h\r\n");
@@ -188,6 +191,17 @@ static void process_command(void)
         if (digit >= '0' && digit <= '3') {
             do_bank_switch(bank_pcr[(uint8_t)(digit - '0')]);
             /* never returns for banks 0–2; bank 3 resets the board */
+        }
+        return;
+    }
+
+    /* ── L — load S-records ─────────────────────────────────────────────── */
+    if (c == 'L' || c == 'l') {
+        uint16_t entry;
+        if (srec_load(&entry) == 0 && entry != 0) {
+            serial_puts("Entry: ");
+            serial_puthex16(entry);
+            serial_putcrlf();
         }
         return;
     }

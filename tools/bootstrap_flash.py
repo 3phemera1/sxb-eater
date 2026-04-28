@@ -190,9 +190,13 @@ def build_flash_writer():
     b(0xA5, BANK_CNT); b(0xC9, 0x04)
     bne('bank_loop')
 
-    # Done — send 'D', reset
+    # Done — send 'D', then jump directly to the wozmon entry point at $8004.
+    # $8004 always holds "JMP wozmon_RESET" (placed there by build_rom.py).
+    # We do NOT use JMP ($FFFC) here because on a warm software reset the RESET
+    # vector points to the WDC init stubs, which assume a cold-boot VIA2 state
+    # and glitch the FT245 USB connection, causing WAIT_TX_READY to hang.
     b(0xA9, ord('D')); jsr('uart_tx')
-    b(0x6C, 0xFC, 0xFF)                    # JMP ($FFFC) reset
+    b(0x4C, 0x04, 0x80)                    # JMP $8004  (-> wozmon_RESET, skip WDC stubs)
 
     # ── uart_tx ────────────────────────────────────────────────────────────
     label('uart_tx')
@@ -256,34 +260,128 @@ def open_port(port):
     return s
 
 
-def sxb2_handshake(s, initial=False):
+def _drain(s, max_total=0.3):
+    """Discard any pending RX bytes. Bounded by max_total seconds."""
+    saved = s.timeout
+    s.timeout = 0.05
+    deadline = time.time() + max_total
+    try:
+        while time.time() < deadline:
+            chunk = s.read(64)
+            if not chunk:
+                break
+    finally:
+        s.timeout = saved
+
+
+def wait_wozmon_ready(s, timeout=10.0):
+    """
+    Wait for wozmon to be actively servicing the FT245 RX FIFO.
+
+    On cold boot wozmon spins in a 5s TXE-wait loop before printing the
+    backslash prompt; during that window any bytes the host sends pile
+    up unread in the FT245 host->device FIFO.  If the user presses NMI
+    while a backlog exists, the handler ACKs the first $A5 it sees
+    (good) but its strict 255-byte recv loop then consumes the leftover
+    backlog as the writer's first bytes (bad -> 'no R from writer').
+
+    Strategy: send $7F (DEL) every 200 ms.  Wozmon's CHRIN echoes each
+    char it processes.  When echoes start arriving back, wozmon is
+    online and draining the FIFO in real time; subsequent NMI press
+    finds an empty FIFO and the handler's recv loop only sees the
+    writer bytes we send.
+
+    Returns True once at least one echo has been observed (and we then
+    drain the resulting echo backlog).  Returns False on timeout.
+    """
+    deadline = time.time() + timeout
+    saved = s.timeout
+    s.timeout = 0.2
+    s.reset_input_buffer()
+    try:
+        while time.time() < deadline:
+            s.write(b'\x7f')
+            s.flush()
+            if s.read(1):
+                # Wozmon is alive; let it catch up on any in-flight chars
+                # we sent earlier, then drain its echoes.
+                time.sleep(0.3)
+                _drain(s, max_total=0.5)
+                return True
+    finally:
+        s.timeout = saved
+    return False
+
+
+def sxb2_handshake(s, initial=False, attempts=None):
     """
     initial=True  (factory mode): send $55/$AA, wait for $CC ACK
     initial=False (NMI mode):     send $A5, wait for $01 ACK
     """
-    if not initial:
-        # NMI mode: send $A5, wait for $01
-        # Don't reset_input_buffer - $01 may arrive any time after NMI press
-        for _ in range(60):
-            s.write(bytes([0xA5]))
-            s.flush()
-            time.sleep(0.3)
-            resp = s.read(2)
-            if resp and resp[0] == 0x01:
-                return True
-        return False
-    else:
-        # Factory SXB2 mode: $55/$AA -> $CC
-        for _ in range(30):
-            s.reset_input_buffer()
-            s.write(bytes([0x55, 0xAA]))
-            s.flush()
-            time.sleep(0.05)
-            resp = s.read(1)
-            if resp == bytes([MAGIC_ACK]):
-                return True
-            time.sleep(0.1)
-        return False
+    saved_timeout = s.timeout
+    try:
+        if not initial:
+            # NMI mode: send $A5, wait for $01
+            n = 60 if attempts is None else attempts
+            s.timeout = 0.3
+            for _ in range(n):
+                s.write(bytes([0xA5]))
+                s.flush()
+                resp = s.read(1)
+                if resp == b'\x01':
+                    return True
+            return False
+        else:
+            # Factory SXB2 mode: $55/$AA -> $CC
+            # SXB2 responds in <1ms; use a short timeout so probing
+            # against a non-SXB2 board (NMI mode) doesn't take 30s.
+            n = 30 if attempts is None else attempts
+            s.timeout = 0.10
+            for _ in range(n):
+                s.reset_input_buffer()
+                s.write(bytes([0x55, 0xAA]))
+                s.flush()
+                resp = s.read(1)
+                if resp == bytes([MAGIC_ACK]):
+                    return True
+            return False
+    finally:
+        s.timeout = saved_timeout
+
+
+def detect_board_state(s):
+    """
+    Probe board to decide which handshake to use.
+    Returns one of:
+      'factory'   - SXB2 host mode answers $55/$AA with $CC
+      'nmi_armed' - user already pressed NMI; handler answered $A5 with $01
+      'nmi'       - no response; caller must instruct user to press NMI
+
+    The probe is non-destructive: $55/$AA into a running wozmon just
+    lands as garbage in its input buffer (no $CC reply); $A5 likewise.
+
+    Total worst-case probe time is ~1.5s (vs ~30s previously) so users
+    don't sit waiting if they pressed NMI early or are about to.
+    """
+    # 1) Check if user already pressed NMI (handler is sitting in @sync_wait
+    #    waiting for $A5; sending $A5 produces an immediate $01 ACK).
+    saved = s.timeout
+    s.timeout = 0.3
+    try:
+        s.reset_input_buffer()
+        s.write(bytes([0xA5]))
+        s.flush()
+        if s.read(1) == b'\x01':
+            return 'nmi_armed'
+    finally:
+        s.timeout = saved
+
+    # 2) Try SXB2 factory host mode (fast: ~10 * 100ms = 1s max).
+    if sxb2_handshake(s, initial=True, attempts=10):
+        return 'factory'
+
+    # 3) Nothing answered — wozmon must be running; NMI press required.
+    return 'nmi'
 
 
 def sxb2_write_mem(s, data, initial=False):
@@ -298,33 +396,93 @@ def sxb2_write_mem(s, data, initial=False):
     time.sleep(0.05 + n * 0.0001)
 
 
-def sxb2_exec(s, addr):
-    """Execute at addr via SXB2 CMD $06."""
-    if not sxb2_handshake(s, initial=False):
+def sxb2_exec(s, addr, initial=True):
+    """Execute at addr via SXB2 CMD $06.
+
+    The SXB2 factory firmware re-enters its $55/$AA -> $CC handshake state
+    after every completed command, so EXEC (like WRITE) needs initial=True
+    when chained after a CMD_WRITE in factory bootstrap mode.
+    """
+    if not sxb2_handshake(s, initial=initial):
         raise RuntimeError("SXB2 handshake failed")
     s.write(bytes([CMD_EXEC, addr & 0xFF, (addr >> 8) & 0xFF, 0x00]))
     s.flush()
 
 
-def upload_writer(s, writer, nmi_mode=False):
-    """Upload flash writer to RAM.
-    nmi_mode=True:  after $01 ACK, send 255 bytes, board executes at $0800
-    nmi_mode=False: factory CMD $07 protocol to $0800
+def nmi_upload_and_arm(s, writer, already_armed=False, max_attempts=4):
     """
-    if nmi_mode:
-        assert len(writer) <= 255, f"Writer too large: {len(writer)}"
-        padded = (writer + bytes(255))[:255]
-        print(f"  Uploading {len(writer)} bytes to $0800 (NMI mode)...")
+    Robust NMI-mode upload of the 255-byte writer. Retries the entire
+    handshake+upload cycle if 'R' is not received (e.g., user pressed
+    NMI again mid-upload, restarting the bank-0 NMI handler).
+
+    Returns True if writer is running and has sent 'R', else False.
+
+    Protocol per attempt:
+      1. Drain stale RX (clears stray $01 ACKs from extra NMI presses).
+      2. (Re)handshake: send $A5 until $01 ACK seen.
+      3. Drain again (extra $A5/ACK pairs from racing).
+      4. Send 255-byte padded writer.
+      5. Read 'R' with bounded timeout. If we get $01, that's another
+         NMI press -- retry from step 1. If timeout, the user probably
+         hasn't pressed NMI yet; retry.
+    """
+    assert len(writer) <= 255, f"Writer too large: {len(writer)}"
+    padded = (writer + bytes(255))[:255]
+
+    for attempt in range(1, max_attempts + 1):
+        if attempt > 1:
+            print(f"  Attempt {attempt}/{max_attempts}: re-arming NMI handler...")
+
+        # 1) Drain any stale ACKs / NMI bytes in flight
+        _drain(s, max_total=0.3)
+
+        # 2) Handshake (skip on first iteration if caller already saw $01)
+        if attempt == 1 and already_armed:
+            print("  NMI handler already armed (detected during probe).")
+        else:
+            if attempt == 1:
+                print("  Press the NMI button on the board now...")
+            if not sxb2_handshake(s, initial=False,
+                                  attempts=60 if attempt == 1 else 20):
+                if attempt == max_attempts:
+                    return False
+                continue
+            print("  Handshake OK!")
+
+        # 3) Drain leftover ACKs (e.g., user pressed NMI multiple times,
+        #    or our handshake loop sent more $A5 than needed)
+        _drain(s, max_total=0.2)
+
+        # 4) Send writer
+        print(f"  Uploading {len(writer)} bytes to ${WRITER_BASE:04x}...")
         s.write(padded)
         s.flush()
-        time.sleep(0.05 + 255 * 0.0001)
-    else:
-        assert len(writer) <= 512, f"Writer too large: {len(writer)}"
-        print(f"  Uploading {len(writer)} bytes to ${WRITER_BASE:04x}...")
-        sxb2_write_mem(s, writer, initial=False)
+
+        # 5) Wait for 'R' from the writer
+        saved = s.timeout
+        s.timeout = 2.0
+        try:
+            r = s.read(1)
+        finally:
+            s.timeout = saved
+
+        if r == b'R':
+            return True
+        if r == b'\x01':
+            # Extra NMI press re-armed the handler mid-upload; the writer
+            # bytes were eaten by @sync_wait. Retry whole cycle.
+            print("  Got stray $01 ACK (likely a second NMI press). Retrying.")
+            continue
+        if r == b'':
+            print("  No 'R' from writer; will retry handshake+upload.")
+            continue
+        print(f"  Unexpected byte {r!r}; will retry.")
+        continue
+
+    return False
 
 
-def bootstrap(port, image_path):
+def bootstrap(port, image_path, mode='auto'):
     print("=" * 55)
     print("  SXB Bootstrap Flasher")
     print("=" * 55)
@@ -357,42 +515,78 @@ def bootstrap(port, image_path):
     print(f"Opening {port}...")
     s = open_port(port)
 
-    # NMI mode: bank 0 has SXB2 with wiped sig
-    nmi_mode = (image[0] == 0xFF and image[4] == 0x4C)
+    # Probe the BOARD STATE (not the image) to decide protocol.
+    # - Factory SXB_orig.bin loaded:  SXB2 host mode answers $55/$AA -> $CC
+    # - Already flashed SXB_eater:    no response; user must press NMI
+    # - User pressed NMI early:       handler already armed; ACKs $A5 -> $01
+    if mode == 'auto':
+        print("Probing board state...")
+        state = detect_board_state(s)
+        print(f"  Detected: {state} mode")
+    else:
+        state = mode
+        print(f"Forced mode: {state}")
+
+    nmi_mode = state in ('nmi', 'nmi_armed')
+    already_armed = (state == 'nmi_armed')
 
     if nmi_mode:
-        print("Waiting for NMI handshake...")
-        print("  (Press NMI button on board)")
-        if not sxb2_handshake(s, initial=False):
-            print("ERROR: No NMI response.")
+        print()
+        if already_armed:
+            print("NMI handler already responded (early press detected).")
+        else:
+            print("Board is not in SXB2 host mode.")
+            # CRITICAL: wait until wozmon is actively servicing the FT245 RX
+            # FIFO before letting the user press NMI.  On cold boot wozmon
+            # spins ~5s in WAIT_TX_READY and any handshake bytes we send
+            # accumulate in the FT245 host->device FIFO; if NMI fires while
+            # the backlog exists, the handler's recv loop consumes the
+            # leftover bytes as the writer's first bytes and corruption
+            # results in 'no R from writer'.
+            print()
+            print("Waiting for wozmon to come online (cold-boot USB"
+                  " enumeration may take a few seconds)...")
+            if wait_wozmon_ready(s, timeout=10.0):
+                print("  Wozmon is responsive — FT245 RX FIFO is being drained.")
+            else:
+                print("  Warning: no echo from wozmon within 10s; proceeding"
+                      " anyway. If NMI handshake fails, power-cycle the board"
+                      " and rerun.")
+        print()
+        print("Uploading flash writer to RAM (with auto-retry)...")
+        if not nmi_upload_and_arm(s, writer, already_armed=already_armed):
+            print("ERROR: Could not arm NMI handler + upload writer.")
+            print("  - Make sure no other program is using the serial port.")
+            print("  - Press NMI exactly ONCE when prompted, then wait.")
+            print("  - If wozmon is running but unresponsive, power-cycle"
+                  " the board, wait for the wozmon prompt to appear, then"
+                  " rerun this script.")
             sys.exit(1)
+        print("  Writer ready!")
     else:
-        print("Waiting for SXB2 handshake...")
-        print("  (Board must be in host mode - bank 0 empty)")
-        if not sxb2_handshake(s, initial=True):
-            print("ERROR: No SXB2 response.")
-            sys.exit(1)
-    print("  Handshake OK!")
-
-    print()
-    print("Uploading flash writer to RAM...")
-    upload_writer(s, writer, nmi_mode=nmi_mode)
-    print("  Upload complete")
-
-    if not nmi_mode:
+        # Factory handshake already succeeded during probe; redo for clean state
+        if mode != 'auto':
+            print("Waiting for SXB2 handshake...")
+            if not sxb2_handshake(s, initial=True):
+                print("ERROR: No SXB2 response.")
+                sys.exit(1)
+        print("  Handshake OK!")
+        print()
+        print("Uploading flash writer to RAM...")
+        assert len(writer) <= 512, f"Writer too large: {len(writer)}"
+        print(f"  Uploading {len(writer)} bytes to ${WRITER_BASE:04x}...")
+        sxb2_write_mem(s, writer, initial=True)
+        print("  Upload complete")
         print("Executing flash writer...")
         sxb2_exec(s, WRITER_BASE)
         time.sleep(0.5)
-    else:
-        time.sleep(0.3)
-
-    # Wait for 'R' (ready)
-    print("Waiting for writer ready signal ('R')...")
-    r = s.read(1)
-    if r != b'R':
-        print(f"ERROR: Expected 'R', got {r!r}")
-        sys.exit(1)
-    print("  Writer ready!")
+        # Wait for 'R' (ready)
+        print("Waiting for writer ready signal ('R')...")
+        r = s.read(1)
+        if r != b'R':
+            print(f"ERROR: Expected 'R', got {r!r}")
+            sys.exit(1)
+        print("  Writer ready!")
 
     print()
     total = len(image)
@@ -642,7 +836,7 @@ def build_flash_writer_for_bank(target_bank):
     b(0xC6, SECT_CNT); bne('sector_loop')
 
     b(0xA9, ord('D')); jsr('uart_tx')
-    b(0x6C, 0xFC, 0xFF)
+    b(0x4C, 0x04, 0x80)                    # JMP $8004  (-> wozmon_RESET, skip WDC stubs)
 
     # uart_tx/rx copied from build_flash_writer
     label('uart_tx')
@@ -691,6 +885,10 @@ if __name__ == '__main__':
         description='Bootstrap or reflash W65C02SXB')
     p.add_argument('port', help='Serial port')
     p.add_argument('image', help='SXB_eater.bin (131072 bytes)')
+    p.add_argument('--mode', choices=['auto', 'factory', 'nmi'], default='auto',
+                   help='Board state: auto-detect (default), factory (SXB2 host '
+                        'mode after fresh SXB_orig.bin), or nmi (already running '
+                        'SXB_eater wozmon - requires NMI button press)')
     p.add_argument('--bank', type=int, choices=[0,1,2,3],
                    help='Reflash single bank only (requires WDCMON in bank 0)')
     p.add_argument('--from-wozmon', action='store_true',
@@ -710,4 +908,4 @@ if __name__ == '__main__':
         else:
             reflash_bank(args.port, args.image, args.bank)
     else:
-        bootstrap(args.port, args.image)
+        bootstrap(args.port, args.image, mode=args.mode)

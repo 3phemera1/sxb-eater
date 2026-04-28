@@ -206,11 +206,24 @@ def build(basic_bin, lbl_file, orig_bin, output_bin, wdcmon_s28=None, monitor_bi
     patch_abs(wdc_usbchk, 0xF9A9, addr_sigchk)
 
     bank3_select = bytearray([
-        0xA9, 0xEE,
-        0x8D, 0xEC, 0x7F,
+        0xA9, 0xEE,             # LDA #$EE
+        0x8D, 0xEC, 0x7F,       # STA $7FEC  (select bank 3)
     ])
-    wdc_sigchk = bank3_select + wdc_sigchk[:-5]
-    print(f"  Sigchk patched to select bank 3 before sig read")
+    # Prepend the bank-select; do NOT trim the original sigchk.  The last
+    # bytes of the original ($F9A9) sigchk are CLC;RTS / SEC;RTS — the
+    # critical epilogue that returns the carry-flag result of the WDC sig
+    # comparison to the caller (usbchk).  Trimming them caused execution
+    # to fall off the end into uninitialised memory on cold boot, which
+    # is why warm boot from NMI worked but cold reset did not produce any
+    # USB I/O.
+    wdc_sigchk = bank3_select + wdc_sigchk
+    # Recompute total now that sigchk grew by 5 bytes
+    addr_sigchk_end = addr_sigchk + len(wdc_sigchk)
+    if addr_sigchk_end > 0xFFFA:
+        raise RuntimeError(
+            f"Stubs overflow vector area: end=${addr_sigchk_end:04x}")
+    print(f"  Sigchk patched to select bank 3 before sig read "
+          f"(now {len(wdc_sigchk)} bytes, ends at ${addr_sigchk_end:04x})")
 
     def write_stub(bank, cpu_addr, data):
         off = cpu_addr - 0x8000
@@ -227,6 +240,17 @@ def build(basic_bin, lbl_file, orig_bin, output_bin, wdcmon_s28=None, monitor_bi
     basic[5] = wozmon_reset & 0xFF
     basic[6] = (wozmon_reset >> 8) & 0xFF
 
+    # RESET vector points at the WDC init stubs.  These do FT245 USB
+    # enumeration / cold-boot peripheral setup that our INIT_BUFFER cannot
+    # fully replicate; without them, cold power-on leaves the FT245 with
+    # no working I/O even though warm reset works.
+    #
+    # All warm-reset paths bypass the RESET vector by jumping straight to
+    # $8004 (which is "JMP wozmon_RESET" placed at the start of bank 3):
+    #   - Wozmon B-commands use BANK_TRAMPOLINE which ends in JMP $8004
+    #   - The bootstrap flash writer ends in JMP $8004
+    # So the WDC stubs only run on true cold boot / hardware RESET button,
+    # which is what we want.
     basic[0x7FFC] = addr_init & 0xFF
     basic[0x7FFD] = (addr_init >> 8) & 0xFF
 
@@ -235,7 +259,7 @@ def build(basic_bin, lbl_file, orig_bin, output_bin, wdcmon_s28=None, monitor_bi
     irq   = basic[0x7FFE] | (basic[0x7FFF]<<8)
     print(f"\nPatched vectors:")
     print(f"  NMI:   ${nmi:04x}")
-    print(f"  RESET: ${reset:04x}  (WDC init -> wozmon -> BASIC)")
+    print(f"  RESET: ${reset:04x}  (WDC init stubs -> wozmon; cold-boot USB enum)")
     print(f"  IRQ:   ${irq:04x}")
     print(f"  $8000: {bytes(basic[0:7]).hex()}")
 

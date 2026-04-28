@@ -34,6 +34,7 @@ WDCMON   = docs/wdc_reference/W65C02SXB.s28
 # ── Bank 1 C monitor sources ─────────────────────────────────────────────────
 MONITOR_DIR  = monitor
 MONITOR_CSRC = $(MONITOR_DIR)/main.c \
+               $(MONITOR_DIR)/srec.c \
                $(MONITOR_DIR)/via.c  \
                $(MONITOR_DIR)/pia.c  \
                $(MONITOR_DIR)/acia.c \
@@ -54,9 +55,9 @@ MONITOR_DEP  = $(BUILD)/monitor.bin
 MONITOR_FLAG = --monitor $(BUILD)/monitor.bin
 endif
 
-.PHONY: all flash clean
+.PHONY: all flash clean hello
 
-all: $(BUILD)/SXB_eater.bin
+all: $(BUILD)/SXB_eater.bin $(BUILD)/hello.bin
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -95,12 +96,45 @@ $(BUILD)/monitor.bin: $(MONITOR_OBJS)
 		$(BUILD)/monitor/crt0.o \
 		$(BUILD)/monitor/serial.o \
 		$(BUILD)/monitor/main.o \
+		$(BUILD)/monitor/srec.o \
 		$(BUILD)/monitor/via.o \
 		$(BUILD)/monitor/pia.o \
 		$(BUILD)/monitor/acia.o \
 		$(BUILD)/monitor/util.o \
 		$(CC65_LIB)/none.lib \
 		-o $@ -Ln $(BUILD)/monitor.lbl
+
+# ── Hello World example ──────────────────────────────────────────────────────
+# Standalone user program that runs in RAM under the bank 1 C monitor.
+# Load address: $4000.  Upload with:
+#   python3 tools/upload.py <port> build/hello.bin --addr 4000 --run
+
+HELLO_DIR  = hello
+
+$(BUILD)/hello:
+	mkdir -p $(BUILD)/hello
+
+$(BUILD)/hello/hello.s: $(HELLO_DIR)/hello.c | $(BUILD)/hello
+	$(CC65) --cpu 65C02 -t none -O -I$(MONITOR_DIR) -o $@ $<
+
+$(BUILD)/hello/hello.o: $(BUILD)/hello/hello.s
+	$(CA65) --cpu 65C02 -o $@ $<
+
+$(BUILD)/hello/crt0.o: $(HELLO_DIR)/crt0.s | $(BUILD)/hello
+	$(CA65) --cpu 65C02 -o $@ $<
+
+$(BUILD)/hello/serial.o: $(MONITOR_DIR)/serial.s | $(BUILD)/hello
+	$(CA65) --cpu 65C02 -o $@ $<
+
+$(BUILD)/hello.bin: $(BUILD)/hello/crt0.o $(BUILD)/hello/hello.o $(BUILD)/hello/serial.o $(HELLO_DIR)/cfg/hello.cfg
+	$(LD65) -C $(HELLO_DIR)/cfg/hello.cfg \
+		$(BUILD)/hello/crt0.o \
+		$(BUILD)/hello/hello.o \
+		$(BUILD)/hello/serial.o \
+		$(CC65_LIB)/none.lib \
+		-o $@ -Ln $(BUILD)/hello.lbl
+
+hello: $(BUILD)/hello.bin
 
 # ── Final ROM image ──────────────────────────────────────────────────────────
 # - If SXB_orig.bin present: full build with WDC init stubs (LED diamond on boot)

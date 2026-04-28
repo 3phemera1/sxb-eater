@@ -178,6 +178,36 @@ NMI_HANDLER:
                 sta     VIA2_ORB
                 stz     VIA2_DDRA
 
+                ; --- Drain stale bytes from FT245 RX before strict recv ---
+                ; On cold boot the host may have sent probe bytes ($A5, $55,
+                ; $AA, more $A5...) while wozmon was still in the 5s TXE
+                ; wait, leaving them queued in FT245 RX.  @sync_wait above
+                ; only consumes ONE $A5; the rest would corrupt the writer.
+                ; Wait for ~6ms of bus silence, consuming any byte that
+                ; arrives during that window.  Host's _drain after ACK is
+                ; ~200ms with no transmits, so silence is reached quickly.
+@drain_stale:   ldx     #$10            ; ~16 outer iters ≈ 6ms total
+@drain_outer:   ldy     #$00
+@drain_inner:   lda     #$02
+                bit     VIA2_ORB
+                beq     @drain_byte     ; bit 1 clear -> byte ready
+                dey
+                bne     @drain_inner
+                dex
+                bne     @drain_outer
+                bra     @drain_done     ; timed out -> bus is silent
+
+@drain_byte:    ; consume one stale byte (RD strobe pulse)
+                lda     #$08
+                trb     VIA2_ORB
+                nop
+                nop
+                lda     VIA2_ORA        ; discard
+                lda     #$08
+                tsb     VIA2_ORB
+                bra     @drain_stale    ; restart timeout window
+
+@drain_done:
                 ; Receive 255 bytes to $0800
                 lda     #$00
                 sta     $20             ; ZP ptr lo
