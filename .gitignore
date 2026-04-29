@@ -4,6 +4,7 @@ build/
 # ROM images
 *.bin
 *.rom
+*.2nd
 
 # Assembler/linker artifacts  
 *.o
