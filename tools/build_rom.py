@@ -96,6 +96,16 @@ def build_no_orig(basic_bin, lbl_file, output_bin, wdcmon_s28=None, monitor_bin=
 def build(basic_bin, lbl_file, orig_bin, output_bin, wdcmon_s28=None, monitor_bin=None):
     with open(orig_bin, 'rb') as f:
         orig = f.read()
+    if len(orig) != 131072:
+        raise SystemExit(
+            f"ERROR: {orig_bin} is {len(orig)} bytes; expected 131072 (128KB).\n"
+            f"  build_rom.py needs a full 4-bank dump.  If this file came from\n"
+            f"  an older bootstrap_flash.py that only captured 32KB of bank 3,\n"
+            f"  re-dump it with the current bootstrap_flash.py (it now writes\n"
+            f"  the full 128KB), or read the chip with:\n"
+            f"    minipro -p \"SST39SF010A\" -r SXB_orig.bin\n"
+            f"  Alternatively rebuild with --no-orig to skip WDC init stubs."
+        )
     with open(basic_bin, 'rb') as f:
         basic = bytearray(f.read())
 

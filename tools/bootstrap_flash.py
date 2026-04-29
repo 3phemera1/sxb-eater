@@ -18,7 +18,8 @@ The flash writer runs entirely from RAM ($1000), so bank switching
 during programming never kills the command loop.
 
 Optional extraction: On first flash of a factory board, this script offers
-to extract bank 3 via a small 65C02 flash reader and save it as SXB_orig.bin
+to extract the full 128KB flash via a small 65C02 flash reader and save it
+as SXB_orig.bin (suitable for use by build_rom.py)
 (or custom filename). This allows future builds to include the WDC init
 stubs (LED diamond, USB enumeration). The extraction only happens on factory
 boards in SXB2 host mode — not on subsequent flashes or NMI recovery.
@@ -56,6 +57,30 @@ UNLOCK2 = 0xAAAA
 
 # Bank PCR values
 PCR = {0: 0xCC, 1: 0xCE, 2: 0xEC, 3: 0xEE}
+
+# Wire order in which build_flash_reader() streams bank data back to the
+# host.  The stub reads bank 3 BEFORE any PCR write to avoid a hardware
+# aliasing artefact where the first ~160 bytes after a $EC→$EE transition
+# return RAM at the stub's address instead of flash data.  Callers MUST
+# reorder the received stream into canonical bank0..bank3 layout.
+READER_STREAM_ORDER = (3, 0, 1, 2)
+
+
+def reorder_reader_stream(stream):
+    """
+    Reorder bytes received from build_flash_reader() (wire order =
+    READER_STREAM_ORDER) into the canonical bank0||bank1||bank2||bank3
+    file layout that build_rom.py and every other consumer expects.
+    """
+    if len(stream) != 131072:
+        raise ValueError(f"expected 131072 bytes, got {len(stream)}")
+    out = bytearray(131072)
+    for wire_idx, bank in enumerate(READER_STREAM_ORDER):
+        src = wire_idx * 0x8000
+        dst = bank * 0x8000
+        out[dst:dst+0x8000] = stream[src:src+0x8000]
+    return bytes(out)
+
 
 # Flash writer base address in RAM
 WRITER_BASE = 0x0800
@@ -393,12 +418,12 @@ def detect_board_state(s):
     return 'nmi'
 
 
-def sxb2_write_mem(s, data, initial=False):
-    """Upload data to RAM at $0800 via SXB2 CMD $07."""
+def sxb2_write_mem(s, data, initial=False, addr=WRITER_BASE):
+    """Upload *data* to RAM at *addr* via SXB2 CMD $07 (default $0800)."""
     if not sxb2_handshake(s, initial=initial):
         raise RuntimeError("SXB2 handshake failed")
     n = len(data)
-    s.write(bytes([CMD_WRITE, 0x00, 0x08, 0x00,
+    s.write(bytes([CMD_WRITE, addr & 0xFF, (addr >> 8) & 0xFF, 0x00,
                    n & 0xFF, (n >> 8) & 0xFF, 0x00]))
     s.write(data)
     s.flush()
@@ -416,6 +441,27 @@ def sxb2_exec(s, addr, initial=True):
         raise RuntimeError("SXB2 handshake failed")
     s.write(bytes([CMD_EXEC, addr & 0xFF, (addr >> 8) & 0xFF, 0x00]))
     s.flush()
+
+
+def sxb2_upload(s, data, addr, initial=False):
+    """Upload data to RAM and execute. Returns True on success, False on error."""
+    try:
+        sxb2_write_mem(s, data, initial=initial)
+        sxb2_exec(s, addr, initial=True)
+        return True
+    except Exception as e:
+        print(f"    Upload/exec error: {e}")
+        return False
+
+
+def sxb2_cmd_exec(s, addr):
+    """Execute at addr and return True on success, False on error."""
+    try:
+        sxb2_exec(s, addr, initial=True)
+        return True
+    except Exception as e:
+        print(f"    Exec error: {e}")
+        return False
 
 
 def nmi_upload_and_arm(s, writer, already_armed=False, max_attempts=4):
@@ -491,16 +537,31 @@ def nmi_upload_and_arm(s, writer, already_armed=False, max_attempts=4):
     return False
 
 
-def build_flash_reader():
+def build_flash_reader(base=None):
     """
-    Build a small 65C02 flash reader that streams bank 3 (32KB) over serial.
-    Runs from RAM at WRITER_BASE ($0800).
-    
+    Build a small 65C02 flash reader that streams the full 128KB of flash
+    (all four 32KB banks) over serial.  Runs from RAM at *base* (default
+    WRITER_BASE = $0800).  *base* is exposed so the dump tool can relocate
+    the stub to test for RAM-aliasing artefacts when bank 3 is selected.
+
+    For each bank the reader writes the matching VIA2 PCR value to swap the
+    flash A15/A16 lines, then streams CPU $8000-$FFFF.  Banks are sent in
+    order 0,1,2,3 so the resulting file is a drop-in for build_rom.py
+    (which slices bank 3 from offset $18000).
+
     Protocol:
       1. Sends 'R' (ready)
-      2. Streams exactly 32768 bytes (bank 3, $8000–$FFFF)
-      3. Sends 'D' (done) and RTS
+      2. Streams exactly 131072 bytes in WIRE ORDER bank3 || bank0 || bank1 || bank2
+         (bank 3 first, with no preceding PCR write — see READER_STREAM_ORDER
+         and the "Bank 3 first" comment block below for why).  Callers MUST
+         reorder the stream into the canonical bank0..bank3 layout before
+         saving — see reorder_reader_stream().
+      3. Restores PCR to $EE (bank 3 visible) so RTS lands back in the
+         SXB2 host-mode firmware that originally JSR'd us.
+      4. Sends 'D' (done) and RTS
     """
+    if base is None:
+        base = WRITER_BASE
     code = bytearray()
     labels = {}
     fixups = []
@@ -522,48 +583,108 @@ def build_flash_reader():
     VIA2_ORB_PAGE  = VIA2_ORB >> 8
     VIA2_ORA_ADDR  = VIA2_ORA & 0xFF
     VIA2_DDRA_ADDR = VIA2_DDRA & 0xFF
+    VIA2_DDRB_ADDR = VIA2_DDRB & 0xFF
 
     label('start')
     b(0x78)                      # SEI
     b(0xA2, 0x00)                # LDX #0
-    b(0xA9, 0xFF)                # LDA #$FF
-    b(0x8D, VIA2_DDRA_ADDR, VIA2_ORB_PAGE)  # STA $7FE3 (DDRA = output)
-    
+    b(0xA0, 0x00)                # LDY #0  (required for LDA (zp) on stock 6502; harmless on 65C02)
+
+    # ── VIA2 init (mirror build_flash_writer) ──
+    # Idle WR (bit 2) and RD (bit 3) HIGH on ORB before flipping DDRB to output,
+    # so we don't glitch a strobe on the FT245. Then make port A an input until
+    # the tx routine drives it.
+    b(0xA9, 0x0C); b(0x8D, VIA2_ORB_ADDR,  VIA2_ORB_PAGE)  # STA VIA2_ORB  = $0C
+    b(0xA9, 0x0C); b(0x8D, VIA2_DDRB_ADDR, VIA2_ORB_PAGE)  # STA VIA2_DDRB = $0C (WR,RD outputs)
+    b(0xA9, 0x00); b(0x8D, VIA2_DDRA_ADDR, VIA2_ORB_PAGE)  # STA VIA2_DDRA = $00 (input)
+
     # Send 'R' ready
     b(0xA9, ord('R'))
     jsr('tx')
-    
-    # Initialize pointer to $8000 and count to 32768
+
+    # ── Bank 3 first, with NO PCR write ──
+    # When SXB2 host mode JSR'd into our stub via CMD_EXEC, bank 3 was
+    # already selected (SXB2 firmware itself lives there).  On this board
+    # an explicit PCR write to $EE before the bank-3 read causes the
+    # first ~160 bytes read from $8000 to mirror the stub's RAM region
+    # ($0800-$089F) instead of returning flash contents.  Symptom is
+    # 100% reproducible across passes, and the corrupted bytes are a
+    # byte-for-byte copy of the reader stub.  Reading bank 3 BEFORE any
+    # PCR transition sidesteps the issue completely.
+    jsr('read_bank')
+
+    # ── Then banks 0, 1, 2 with explicit PCR writes ──
+    # PCR drives flash A15/A16 via VIA2 CA2/CB2 outputs.  The PCR values
+    # come from the project-wide PCR{} table at the top of this file.
+    # Bank-switching INTO 0/1/2 has not exhibited the aliasing artefact.
+    for bank in (0, 1, 2):
+        b(0xA9, PCR[bank])                              # LDA #pcr_val
+        b(0x8D, VIA2_PCR & 0xFF, VIA2_PCR >> 8)         # STA VIA2_PCR
+        jsr('read_bank')
+
+    # Restore PCR to bank 3 so RTS lands back in the original SXB2 host-mode
+    # firmware (which lives in bank 3 ROM and called us via sxb2_exec).
+    b(0xA9, PCR[3])
+    b(0x8D, VIA2_PCR & 0xFF, VIA2_PCR >> 8)
+
+    # Send 'D' done
+    b(0xA9, ord('D'))
+    jsr('tx')
+    b(0x60)                            # RTS
+
+    # ── read_bank: stream $8000-$FFFF (32KB) of currently-visible bank ──
+    label('read_bank')
+
+    # ── Flash software reset before reading ──
+    # The SST39SF010A enters several extended modes (Software-ID,
+    # sector-erase-suspend, byte-program-busy) in which reads return
+    # chip-internal status instead of flash contents.  SXB2's
+    # CMD_WRITE/CMD_EXEC handoff appears to leave the chip in such a
+    # mode for bank 3 specifically (symptom: first len(stub) bytes of
+    # the bank-3 read return the stub's RAM region byte-for-byte,
+    # 100% reproducible across passes, scaling exactly with stub size).
+    # The Reset command — write $F0 to any address with the chip
+    # selected — exits any extended mode unconditionally.  Cheap and
+    # idempotent: a no-op when the chip is already in normal read mode.
+    b(0xA9, 0xF0)                      # LDA #$F0
+    b(0x8D, 0x00, 0x80)                # STA $8000  (flash reset)
+
+    # 256 dummy reads to let the reset propagate and absorb any residual
+    # stale-bus state.  ~1ms; harmless if not needed.
+    b(0xA2, 0x00)                      # LDX #0
+    label('warmup_loop')
+    b(0xBD, 0x00, 0x80)                # LDA $8000,X
+    b(0xCA)                            # DEX
+    bne('warmup_loop')                 # 256 iterations
+
     b(0xA9, 0x00); b(0x85, PTR_LO)     # LDA #$00; STA PTR_LO
     b(0xA9, 0x80); b(0x85, PTR_HI)     # LDA #$80; STA PTR_HI
     b(0xA9, 0x00); b(0x85, CNT_LO)     # LDA #$00; STA CNT_LO  (32768 = $8000)
     b(0xA9, 0x80); b(0x85, CNT_HI)     # LDA #$80; STA CNT_HI
-    
+
     label('read_loop')
-    # Read byte at (PTR_LO, PTR_HI)
-    b(0xB1, PTR_LO)                    # LDA (PTR_LO, X)  [X=0]
+    # Read byte at (PTR_LO,PTR_HI) using 65C02 indirect-zp ($B2)
+    b(0xB2, PTR_LO)                    # LDA (PTR_LO)
     jsr('tx')
-    
+
     # Increment pointer
     b(0xE6, PTR_LO)                    # INC PTR_LO
     b(0xD0, 0x03)                      # BNE +3
     b(0xE6, PTR_HI)                    # INC PTR_HI
     b(0xEA)                            # NOP
-    
-    # Decrement counter
+
+    # Decrement 16-bit counter (only DEC CNT_HI when CNT_LO underflows to 0).
+    # BNE must skip past LDA CNT_HI (2) + DEC A (1) + STA CNT_HI (2) = 5 bytes.
     b(0xA5, CNT_LO); b(0x3A)           # LDA CNT_LO; DEC
     b(0x85, CNT_LO)                    # STA CNT_LO
-    b(0xD0, 0x03)                      # BNE +3
+    b(0xD0, 0x05)                      # BNE +5  (skip the dec-HI block)
     b(0xA5, CNT_HI); b(0x3A)           # LDA CNT_HI; DEC
     b(0x85, CNT_HI)                    # STA CNT_HI
-    
+
     # If count != 0, loop
     b(0xA5, CNT_LO); b(0x05, CNT_HI)   # LDA CNT_LO; ORA CNT_HI
     bne('read_loop')
-    
-    # Send 'D' done
-    b(0xA9, ord('D'))
-    jsr('tx')
+
     b(0x60)                            # RTS
     
     # ── uart_tx (copied from build_flash_writer) ──
@@ -593,42 +714,48 @@ def build_flash_reader():
     
     # Apply fixups
     for off, name, rel_base, kind in fixups:
-        target_abs = WRITER_BASE + labels[name]
+        target_abs = base + labels[name]
         if kind == 'abs':
             code[off]   = target_abs & 0xFF
             code[off+1] = target_abs >> 8
         else:
-            code[off] = (target_abs - (WRITER_BASE + rel_base)) & 0xFF
+            code[off] = (target_abs - (base + rel_base)) & 0xFF
 
     return bytes(code)
 
 
-def extract_bank3(s, prompt_filename='SXB_orig.bin'):
+def extract_full_flash(s, prompt_filename='SXB_orig.bin'):
     """
-    Upload and execute a flash reader to extract bank 3 (32KB) from the board.
-    Returns the 32KB bytes, or None if user declines.
-    Also prompts to save to file if user wishes.
+    Upload and execute a flash reader to extract the full 128KB of flash
+    (all 4 banks) from the board.  Returns the 131072 bytes, or None if
+    the user declines or an error occurs.  Also prompts to save to file.
+
+    Layout of the returned bytes matches what build_rom.py expects:
+      $00000-$07FFF  bank 0
+      $08000-$0FFFF  bank 1
+      $10000-$17FFF  bank 2
+      $18000-$1FFFF  bank 3  (factory SXB2 firmware on a fresh board)
     """
     print()
     print("─" * 55)
     print("Factory board detected. Bank 3 contains original SXB2 firmware.")
     print("─" * 55)
     print()
-    print("Would you like to save a backup of bank 3?")
+    print("Would you like to save a backup of the full 128KB flash?")
     print("(Recommended for future builds without a chip reader)")
     print()
-    
+
     # Prompt with suggested filename
     response = input(f"Save to file [{prompt_filename}]? (y/n): ").strip().lower()
     if response not in ('y', 'yes', ''):
         print("Skipping backup.")
         return None
-    
+
     # Get filename
     filename = input(f"Filename [{prompt_filename}]: ").strip()
     if not filename:
         filename = prompt_filename
-    
+
     # Check if file exists
     import os
     if os.path.exists(filename):
@@ -636,60 +763,75 @@ def extract_bank3(s, prompt_filename='SXB_orig.bin'):
         if response not in ('y', 'yes'):
             print("Skipping backup.")
             return None
-    
+
     print()
     print("Building flash reader...")
     reader = build_flash_reader()
     print(f"  {len(reader)} bytes at ${WRITER_BASE:04x}")
-    
+
     print("Uploading flash reader...")
-    if not sxb2_upload(s, reader, WRITER_BASE):
-        print("  ERROR: upload failed")
+    try:
+        sxb2_write_mem(s, reader, initial=True)
+    except Exception as e:
+        print(f"  ERROR: upload failed: {e}")
         return None
     print("  Upload OK")
-    
+
     print("Executing flash reader...")
     s.reset_input_buffer()
-    
-    if not sxb2_cmd_exec(s, WRITER_BASE):
-        print("  ERROR: exec failed")
+    try:
+        sxb2_exec(s, WRITER_BASE, initial=True)
+    except Exception as e:
+        print(f"  ERROR: exec failed: {e}")
         return None
-    
+
     # Wait for 'R' (ready)
     s.timeout = 2.0
     resp = s.read(1)
     if resp != b'R':
         print(f"  ERROR: expected 'R', got {resp!r}")
         return None
-    
-    print("  Receiving bank 3... (32KB)", end='', flush=True)
-    bank3 = bytearray()
+
+    TOTAL = 131072  # 4 banks × 32KB
+    print(f"  Receiving full flash... (128KB)", end='', flush=True)
+    flash = bytearray()
     s.timeout = 0.5
-    
-    # Read exactly 32768 bytes
-    while len(bank3) < 32768:
-        chunk = s.read(32768 - len(bank3))
+
+    # Read exactly 131072 bytes
+    last_dot_at = 0
+    while len(flash) < TOTAL:
+        chunk = s.read(TOTAL - len(flash))
         if not chunk:
-            print(f"\n  ERROR: timeout after {len(bank3)} bytes")
+            print(f"\n  ERROR: timeout after {len(flash)} bytes")
             return None
-        bank3.extend(chunk)
-        if len(bank3) % 4096 == 0:
+        flash.extend(chunk)
+        # One dot per 8KB so the user sees progress across all 4 banks
+        while last_dot_at + 8192 <= len(flash):
             print('.', end='', flush=True)
-    
+            last_dot_at += 8192
+
     # Wait for 'D' (done)
     resp = s.read(1)
     if resp != b'D':
         print(f"\n  WARNING: expected 'D', got {resp!r}")
-    
-    print(f"\n  Received {len(bank3)} bytes")
-    
+
+    print(f"\n  Received {len(flash)} bytes")
+
+    # Reorder wire-order stream (READER_STREAM_ORDER = bank3,0,1,2) into
+    # canonical bank0||bank1||bank2||bank3 layout that build_rom.py wants.
+    flash = reorder_reader_stream(bytes(flash))
+
     # Save to file
     print(f"Saving to {filename}...")
     with open(filename, 'wb') as f:
-        f.write(bank3)
-    print(f"  Saved {len(bank3)} bytes")
-    
-    return bytes(bank3)
+        f.write(flash)
+    print(f"  Saved {len(flash)} bytes")
+
+    return bytes(flash)
+
+
+# Backward-compat alias for any external caller that imported the old name.
+extract_bank3 = extract_full_flash
 
 
 def bootstrap(port, image_path, mode='auto'):
@@ -783,8 +925,9 @@ def bootstrap(port, image_path, mode='auto'):
         print("  Handshake OK!")
         print()
         
-        # Offer to extract bank 3 (factory firmware) on first flash only
-        extract_bank3(s, prompt_filename='SXB_orig.bin')
+        # Offer to dump the entire 128KB flash (factory firmware) on first
+        # flash only.  build_rom.py wants a 128KB image; the dump matches.
+        extract_full_flash(s, prompt_filename='SXB_orig.bin')
         
         print()
         print("Uploading flash writer to RAM...")
