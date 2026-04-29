@@ -106,13 +106,12 @@ def build_flash_writer():
     # ── Entry ──────────────────────────────────────────────────────────────
     label('start')
     b(0x78)                      # SEI
-    b(0xD8)                      # CLD
     b(0xA2, 0x00)                # LDX #0 (keep X=0 throughout)
 
     # VIA2 init
     b(0xA9, 0x0C); b(0x8D, VIA2_ORB&0xFF, VIA2_ORB>>8)
     b(0xA9, 0x0C); b(0x8D, VIA2_DDRB&0xFF, VIA2_DDRB>>8)
-    b(0xA9, 0x00); b(0x8D, VIA2_DDRA&0xFF, VIA2_DDRA>>8)
+    b(0x64, VIA2_DDRA&0xFF)                # STZ VIA2_DDRA (65C02)
 
     # Send 'R' ready signal
     b(0xA9, ord('R')); jsr('uart_tx')
@@ -178,9 +177,8 @@ def build_flash_writer():
 
     # Advance pointer
     b(0xE6, PTR_LO)
-    b(0xD0, 0x03)                           # BNE +3
+    b(0xD0, 0x02)                           # BNE +2
     b(0xE6, PTR_HI)
-    b(0xEA)                                 # NOP (branch target padding)
 
     # Dec byte counter
     label('dec_bc')
@@ -215,10 +213,13 @@ def build_flash_writer():
     label('tx_wait')
     b(0xA9, 0x01); b(0x2C, VIA2_ORB&0xFF, VIA2_ORB>>8)
     bne('tx_wait')
+    b(0x2C, VIA2_ORB&0xFF, VIA2_ORB>>8)  # BIT VIA2_ORB (filter glitches)
+    bne('tx_wait')
+    # WR strobe: TSB bit 2
     b(0xAD, VIA2_ORB&0xFF, VIA2_ORB>>8)
     b(0x09, 0x04); b(0x8D, VIA2_ORB&0xFF, VIA2_ORB>>8)
     b(0xA9, 0xFF); b(0x8D, VIA2_DDRA&0xFF, VIA2_DDRA>>8)
-    b(0xEA); b(0xEA)
+    # TRB bit 2 (WR strobe low)
     b(0xAD, VIA2_ORB&0xFF, VIA2_ORB>>8)
     b(0x29, 0xFB); b(0x8D, VIA2_ORB&0xFF, VIA2_ORB>>8)
     b(0xA9, 0x00); b(0x8D, VIA2_DDRA&0xFF, VIA2_DDRA>>8)
@@ -577,11 +578,12 @@ def build_flash_reader():
     b(0xA9, 0x01)
     b(0x2C, VIA2_ORB_ADDR, VIA2_ORB_PAGE)   # BIT VIA2_ORB
     bne('tx_wait')
+    b(0x2C, VIA2_ORB_ADDR, VIA2_ORB_PAGE)   # BIT VIA2_ORB (filter glitches)
+    bne('tx_wait')
     b(0xA9, 0xFF)
     b(0x8D, VIA2_DDRA_ADDR, VIA2_ORB_PAGE)  # STA VIA2_DDRA
     b(0xA9, 0x04)
     b(0x0C, VIA2_ORB_ADDR, VIA2_ORB_PAGE)   # TSB VIA2_ORB
-    b(0xEA); b(0xEA)
     b(0xA9, 0x04)
     b(0x1C, VIA2_ORB_ADDR, VIA2_ORB_PAGE)   # TRB VIA2_ORB
     b(0xA9, 0x00)
