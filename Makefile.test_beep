@@ -1,0 +1,32 @@
+BUILD = build
+TEST_DIR = monitor
+
+$(BUILD)/test:
+	mkdir -p $(BUILD)/test
+
+$(BUILD)/test/test_beep.s: $(TEST_DIR)/test_beep.c | $(BUILD)/test
+	$(CC65) --cpu 65C02 -t none -O -I$(MONITOR_DIR) -o $@ $<
+
+$(BUILD)/test/test_beep.o: $(BUILD)/test/test_beep.s
+	$(CA65) --cpu 65C02 -o $@ $<
+
+$(BUILD)/test/crt0.o: $(HELLO_DIR)/crt0.s | $(BUILD)/test
+	$(CA65) --cpu 65C02 -o $@ $<
+
+$(BUILD)/test/serial.o: $(MONITOR_DIR)/serial.s | $(BUILD)/test
+	$(CA65) --cpu 65C02 -o $@ $<
+
+$(BUILD)/test/stdio_eater.o: $(MONITOR_DIR)/stdio_eater.c | $(BUILD)/test
+	$(CC65) --cpu 65C02 -t none -O -I$(MONITOR_DIR) -o $@ $<
+	$(CA65) --cpu 65C02 -o $@ $(BUILD)/test/stdio_eater.s
+
+$(BUILD)/test_beep.bin: $(BUILD)/test/crt0.o $(BUILD)/test/test_beep.o $(BUILD)/test/serial.o $(BUILD)/test/stdio_eater.o $(HELLO_DIR)/cfg/hello.cfg
+	$(LD65) -C $(HELLO_DIR)/cfg/hello.cfg \
+		$(BUILD)/test/crt0.o \
+		$(BUILD)/test/test_beep.o \
+		$(BUILD)/test/serial.o \
+		$(BUILD)/test/stdio_eater.o \
+		$(CC65_LIB)/none.lib \
+		-o $@ -Ln $(BUILD)/test_beep.lbl
+
+all: $(BUILD)/test_beep.bin

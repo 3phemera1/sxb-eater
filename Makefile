@@ -57,7 +57,7 @@ endif
 
 .PHONY: all flash clean hello
 
-all: $(BUILD)/SXB_eater.bin $(BUILD)/hello.bin
+all: $(BUILD)/SXB_eater.bin $(BUILD)/hello.bin $(BUILD)/test_beep.bin
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -110,9 +110,13 @@ $(BUILD)/monitor.bin: $(MONITOR_OBJS)
 #   python3 tools/upload.py <port> build/hello.bin --addr 4000 --run
 
 HELLO_DIR  = hello
+TEST_DIR   = monitor
 
 $(BUILD)/hello:
 	mkdir -p $(BUILD)/hello
+
+$(BUILD)/test:
+	mkdir -p $(BUILD)/test
 
 $(BUILD)/hello/hello.s: $(HELLO_DIR)/hello.c | $(BUILD)/hello
 	$(CC65) --cpu 65C02 -t none -O -I$(MONITOR_DIR) -o $@ $<
@@ -126,6 +130,30 @@ $(BUILD)/hello/crt0.o: $(HELLO_DIR)/crt0.s | $(BUILD)/hello
 $(BUILD)/hello/serial.o: $(MONITOR_DIR)/serial.s | $(BUILD)/hello
 	$(CA65) --cpu 65C02 -o $@ $<
 
+$(BUILD)/test/test_beep.s: $(TEST_DIR)/test_beep.c | $(BUILD)/test
+	$(CC65) --cpu 65C02 -t none -O -I$(MONITOR_DIR) -o $@ $<
+
+$(BUILD)/test/test_beep.o: $(BUILD)/test/test_beep.s
+	$(CA65) --cpu 65C02 -o $@ $<
+
+$(BUILD)/test/crt0.o: $(HELLO_DIR)/crt0.s | $(BUILD)/test
+	$(CA65) --cpu 65C02 -o $@ $<
+
+$(BUILD)/test/serial.o: $(MONITOR_DIR)/serial.s | $(BUILD)/test
+	$(CA65) --cpu 65C02 -o $@ $<
+
+$(BUILD)/test/stdio_eater.s: $(MONITOR_DIR)/stdio_eater.c | $(BUILD)/test
+	$(CC65) --cpu 65C02 -t none -O -I$(MONITOR_DIR) -o $@ $<
+
+$(BUILD)/test/stdio_eater.o: $(BUILD)/test/stdio_eater.s
+	$(CA65) --cpu 65C02 -o $@ $<
+
+$(BUILD)/test/via.s: $(MONITOR_DIR)/via.c | $(BUILD)/test
+	$(CC65) --cpu 65C02 -t none -O -I$(MONITOR_DIR) -o $@ $<
+
+$(BUILD)/test/via.o: $(BUILD)/test/via.s
+	$(CA65) --cpu 65C02 -o $@ $<
+
 $(BUILD)/hello.bin: $(BUILD)/hello/crt0.o $(BUILD)/hello/hello.o $(BUILD)/hello/serial.o $(HELLO_DIR)/cfg/hello.cfg
 	$(LD65) -C $(HELLO_DIR)/cfg/hello.cfg \
 		$(BUILD)/hello/crt0.o \
@@ -133,6 +161,16 @@ $(BUILD)/hello.bin: $(BUILD)/hello/crt0.o $(BUILD)/hello/hello.o $(BUILD)/hello/
 		$(BUILD)/hello/serial.o \
 		$(CC65_LIB)/none.lib \
 		-o $@ -Ln $(BUILD)/hello.lbl
+
+$(BUILD)/test_beep.bin: $(BUILD)/test/crt0.o $(BUILD)/test/test_beep.o $(BUILD)/test/serial.o $(BUILD)/test/stdio_eater.o $(BUILD)/test/via.o $(HELLO_DIR)/cfg/hello.cfg
+	$(LD65) -C $(HELLO_DIR)/cfg/hello.cfg \
+		$(BUILD)/test/crt0.o \
+		$(BUILD)/test/test_beep.o \
+		$(BUILD)/test/serial.o \
+		$(BUILD)/test/stdio_eater.o \
+		$(BUILD)/test/via.o \
+		$(CC65_LIB)/none.lib \
+		-o $@ -Ln $(BUILD)/test_beep.lbl
 
 hello: $(BUILD)/hello.bin
 
